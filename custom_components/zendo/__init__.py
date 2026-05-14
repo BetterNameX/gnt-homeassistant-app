@@ -1,5 +1,6 @@
 """The Zendo integration."""
 
+import json
 import logging
 import time
 
@@ -7,13 +8,14 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api_client import fetch_profiles, send_notification
 from .const import (
+    CONF_CACHED_DEEP_LINK_DESTINATIONS,
     CONF_CACHED_PROFILES,
     CONF_PUSH_NOTIFICATION_TOKEN,
     CONF_REFRESH_TIMESTAMPS,
@@ -35,11 +37,15 @@ SECONDS_IN_DAY = 86400
 SERVICE_SETUP_PUSH_NOTIFICATIONS = "setup_push_notifications"
 SERVICE_REFRESH_PROFILES = "refresh_profiles"
 SERVICE_SEND_NOTIFICATION = "send_notification"
+SERVICE_SET_DEEP_LINK_DESTINATIONS = "set_deep_link_destinations"
+SERVICE_LIST_DEEP_LINK_DESTINATIONS = "list_deep_link_destinations"
 
 STATIC_SERVICES = [
     SERVICE_SETUP_PUSH_NOTIFICATIONS,
     SERVICE_REFRESH_PROFILES,
     SERVICE_SEND_NOTIFICATION,
+    SERVICE_SET_DEEP_LINK_DESTINATIONS,
+    SERVICE_LIST_DEEP_LINK_DESTINATIONS,
 ]
 
 # --- Service schemas ---
@@ -55,9 +61,16 @@ SERVICE_SEND_NOTIFICATION_SCHEMA = vol.Schema(
         vol.Required(ATTR_ENTITY_ID): cv.entity_ids,
         vol.Required("message"): vol.All(cv.string, vol.Length(min=1)),
         vol.Optional("interruption_level"): vol.In(["time_sensitive", "critical"]),
+        vol.Optional("deep_link_destination"): cv.string,
     },
     extra=vol.REMOVE_EXTRA,
 )
+
+SERVICE_SET_DEEP_LINK_DESTINATIONS_SCHEMA = vol.Schema(
+    {vol.Required("destinations"): vol.All(cv.string, vol.Length(min=1))}
+)
+
+SERVICE_LIST_DEEP_LINK_DESTINATIONS_SCHEMA = vol.Schema({})
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +98,7 @@ def _build_notification(
     profile_id: str,
     message: str,
     interruption_level: str | None,
+    deep_link_uri: str | None = None,
 ) -> dict:
     """Build a single GraphQL notification input dict."""
     notification: dict = {
@@ -96,6 +110,12 @@ def _build_notification(
         notification["interruptionLevel"] = "TIME_SENSITIVE"
     elif interruption_level == "critical":
         notification["interruptionLevel"] = "CRITICAL"
+
+    if deep_link_uri:
+        notification["linking"] = {
+            "type": "DEEPLINK_V1",
+            "value": deep_link_uri,
+        }
 
     return notification
 
@@ -193,6 +213,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entity_ids: list[str] = call.data[ATTR_ENTITY_ID]
         message: str = call.data["message"]
         interruption_level: str | None = call.data.get("interruption_level")
+        deep_link_destination_id: str | None = call.data.get("deep_link_destination")
+
+        # Resolve deep link destination ID to its URI
+        deep_link_uri: str | None = None
+        if deep_link_destination_id:
+            entries = hass.config_entries.async_entries(DOMAIN)
+            if entries:
+                cached: list[dict] = entries[0].data.get(
+                    CONF_CACHED_DEEP_LINK_DESTINATIONS, []
+                )
+                dest = next(
+                    (d for d in cached if d.get("id") == deep_link_destination_id),
+                    None,
+                )
+                if dest:
+                    deep_link_uri = dest.get("link")
+                else:
+                    _LOGGER.warning(
+                        "Deep link destination '%s' not found in cached destinations",
+                        deep_link_destination_id,
+                    )
 
         entity_map: dict[str, str] = hass.data[DOMAIN].get("notify_entities", {})
         notifications = []
@@ -207,13 +248,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
             notifications.append(
-                _build_notification(profile_id, message, interruption_level)
+                _build_notification(
+                    profile_id, message, interruption_level, deep_link_uri
+                )
             )
 
         if not notifications:
             raise HomeAssistantError("No valid entities targeted.")
 
         await send_notification(hass, token, notifications)
+
+    # --- set_deep_link_destinations ---
+
+    async def handle_set_deep_link_destinations(call: ServiceCall) -> None:
+        """Store the list of deep link destinations from the mobile app."""
+        raw = call.data["destinations"]
+        try:
+            destinations = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as err:
+            raise HomeAssistantError(
+                f"Invalid JSON in destinations: {err}"
+            ) from err
+
+        if not isinstance(destinations, list):
+            raise HomeAssistantError("destinations must be a JSON array")
+
+        entries = hass.config_entries.async_entries(DOMAIN)
+        if not entries:
+            raise HomeAssistantError("Zendo integration is not configured")
+
+        target_entry = entries[0]
+        hass.config_entries.async_update_entry(
+            target_entry,
+            data={
+                **target_entry.data,
+                CONF_CACHED_DEEP_LINK_DESTINATIONS: destinations,
+            },
+        )
+
+    # --- list_deep_link_destinations ---
+
+    async def handle_list_deep_link_destinations(
+        call: ServiceCall,
+    ) -> ServiceResponse:
+        """Return stored deep link destinations."""
+        entries = hass.config_entries.async_entries(DOMAIN)
+        destinations: list[dict] = []
+        if entries:
+            destinations = entries[0].data.get(
+                CONF_CACHED_DEEP_LINK_DESTINATIONS, []
+            )
+        return {"destinations": destinations}
 
     # --- Register all services ---
 
@@ -230,11 +315,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             handle_send_notification,
             SERVICE_SEND_NOTIFICATION_SCHEMA,
         ),
+        SERVICE_SET_DEEP_LINK_DESTINATIONS: (
+            handle_set_deep_link_destinations,
+            SERVICE_SET_DEEP_LINK_DESTINATIONS_SCHEMA,
+        ),
     }
 
     for name, (handler, schema) in service_map.items():
         if not hass.services.has_service(DOMAIN, name):
             hass.services.async_register(DOMAIN, name, handler, schema=schema)
+
+    # list_deep_link_destinations uses SupportsResponse
+    if not hass.services.has_service(DOMAIN, SERVICE_LIST_DEEP_LINK_DESTINATIONS):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_LIST_DEEP_LINK_DESTINATIONS,
+            handle_list_deep_link_destinations,
+            schema=SERVICE_LIST_DEEP_LINK_DESTINATIONS_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
+        )
 
     return True
 

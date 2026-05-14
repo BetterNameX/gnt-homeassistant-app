@@ -36,8 +36,26 @@
         "interruption_level": {
           "name": "Interruption level",
           "description": "Optional. Set to \"time_sensitive\" for time-sensitive notifications or \"critical\" for critical alerts that bypass Do Not Disturb."
+        },
+        "deep_link_destination": {
+          "name": "Deep link destination",
+          "description": "Optional. The ID of a deep link destination. Tapping the notification opens the corresponding view in the Zendo app. Use the list_deep_link_destinations service to see available IDs."
         }
       }
+    },
+    "set_deep_link_destinations": {
+      "name": "Set deep link destinations",
+      "description": "Store the list of deep link destinations from the Zendo mobile app.",
+      "fields": {
+        "destinations": {
+          "name": "Destinations",
+          "description": "JSON-encoded array of deep link destinations."
+        }
+      }
+    },
+    "list_deep_link_destinations": {
+      "name": "List deep link destinations",
+      "description": "List stored deep link destinations for use in automations."
     }
   }
 }
