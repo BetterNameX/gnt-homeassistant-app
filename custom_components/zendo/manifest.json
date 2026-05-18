@@ -3,9 +3,9 @@
   "name": "Zendo",
   "codeowners": ["@BetterNameX"],
   "config_flow": true,
-  "documentation": "https://github.com/BetterNameX/gnt-homeassistant-hacs-app",
+  "documentation": "https://github.com/BetterNameX/gnt-homeassistant-app",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/BetterNameX/gnt-homeassistant-hacs-app/issues",
+  "issue_tracker": "https://github.com/BetterNameX/gnt-homeassistant-app/issues",
   "requirements": [],
-  "version": "1.0.1"
+  "version": "1.3.0"
 }
