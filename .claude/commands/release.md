@@ -11,3 +11,5 @@ Then:
 1. Update the `version` field in `custom_components/zendo/manifest.json` to the new version
 2. Stage the file: `git add custom_components/zendo/manifest.json`
 3. Commit with the message `v<VERSION>` (e.g. `v1.4.0`) - do NOT include a Co-Authored-By line
+4. Create a git tag with the version number (e.g. `git tag 1.4.0`)
+5. Push the commit and tag: `git push && git push --tags`
