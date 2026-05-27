@@ -1,6 +1,6 @@
 # Zendo for Home Assistant
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/integration)
 
 Control Home Assistant from a floor plan with [Zendo](https://myzendo.com).
 
@@ -8,14 +8,10 @@ Control Home Assistant from a floor plan with [Zendo](https://myzendo.com).
 
 ### HACS (Recommended)
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=BetterNameX&repository=gnt-homeassistant-app&category=integration)
-
 1. Open HACS in your Home Assistant instance.
 2. Go to **Integrations**.
-3. Click the three-dot menu in the top right and select **Custom repositories**.
-4. Add `https://github.com/BetterNameX/gnt-homeassistant-app` with category **Integration**.
-5. Search for **Zendo** and install it.
-6. Restart Home Assistant.
+3. Search for **Zendo** and install it.
+4. Restart Home Assistant.
 
 ### Manual
 
