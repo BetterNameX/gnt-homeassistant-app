@@ -39,6 +39,7 @@ SERVICE_REFRESH_PROFILES = "refresh_profiles"
 SERVICE_SEND_NOTIFICATION = "send_notification"
 SERVICE_SET_DEEP_LINK_DESTINATIONS = "set_deep_link_destinations"
 SERVICE_LIST_DEEP_LINK_DESTINATIONS = "list_deep_link_destinations"
+SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE = "notify_site_config_manifest_update"
 
 STATIC_SERVICES = [
     SERVICE_SETUP_PUSH_NOTIFICATIONS,
@@ -46,6 +47,7 @@ STATIC_SERVICES = [
     SERVICE_SEND_NOTIFICATION,
     SERVICE_SET_DEEP_LINK_DESTINATIONS,
     SERVICE_LIST_DEEP_LINK_DESTINATIONS,
+    SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE,
 ]
 
 # --- Service schemas ---
@@ -71,6 +73,10 @@ SERVICE_SET_DEEP_LINK_DESTINATIONS_SCHEMA = vol.Schema(
 )
 
 SERVICE_LIST_DEEP_LINK_DESTINATIONS_SCHEMA = vol.Schema({})
+
+SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE_SCHEMA = vol.Schema(
+    {vol.Required("payload"): vol.All(cv.string, vol.Length(min=1))}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +292,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             },
         )
 
+    # --- notify_site_config_manifest_update ---
+
+    async def handle_notify_site_config_manifest_update(call: ServiceCall) -> None:
+        """Broadcast a site config manifest update event to connected clients."""
+        payload = call.data.get("payload")
+        hass.bus.async_fire("zendo_site_config_manifest_updated", {"payload": payload})
+
     # --- list_deep_link_destinations ---
 
     async def handle_list_deep_link_destinations(
@@ -318,6 +331,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         SERVICE_SET_DEEP_LINK_DESTINATIONS: (
             handle_set_deep_link_destinations,
             SERVICE_SET_DEEP_LINK_DESTINATIONS_SCHEMA,
+        ),
+        SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE: (
+            handle_notify_site_config_manifest_update,
+            SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE_SCHEMA,
         ),
     }
 

@@ -72,3 +72,15 @@ list_deep_link_destinations:
   name: List deep link destinations
   description: >-
     List stored deep link destinations for use in automations.
+
+notify_site_config_manifest_update:
+  name: Notify site config manifest updated
+  description: >-
+    Broadcast a site config manifest update event to connected clients.
+  fields:
+    payload:
+      name: Payload
+      description: JSON string containing the site config manifest update metadata.
+      required: true
+      selector:
+        text:
