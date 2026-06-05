@@ -8,6 +8,12 @@
     },
     "send_notification": {
       "service": "mdi:message-arrow-right"
+    },
+    "ring_doorbell": {
+      "service": "mdi:doorbell-video"
+    },
+    "doorbell_action": {
+      "service": "mdi:bell-cancel"
     }
   }
 }

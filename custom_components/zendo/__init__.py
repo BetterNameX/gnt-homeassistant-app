@@ -9,7 +9,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
@@ -40,6 +40,8 @@ SERVICE_SEND_NOTIFICATION = "send_notification"
 SERVICE_SET_DEEP_LINK_DESTINATIONS = "set_deep_link_destinations"
 SERVICE_LIST_DEEP_LINK_DESTINATIONS = "list_deep_link_destinations"
 SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE = "notify_site_config_manifest_update"
+SERVICE_RING_DOORBELL = "ring_doorbell"
+SERVICE_DOORBELL_ACTION = "doorbell_action"
 
 STATIC_SERVICES = [
     SERVICE_SETUP_PUSH_NOTIFICATIONS,
@@ -48,7 +50,17 @@ STATIC_SERVICES = [
     SERVICE_SET_DEEP_LINK_DESTINATIONS,
     SERVICE_LIST_DEEP_LINK_DESTINATIONS,
     SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE,
+    SERVICE_RING_DOORBELL,
+    SERVICE_DOORBELL_ACTION,
 ]
+
+# The doorbell ring sound plays a configurable number of times (1-5, default 1).
+DOORBELL_REPEAT_MIN = 1
+DOORBELL_REPEAT_MAX = 5
+DOORBELL_REPEAT_DEFAULT = 1
+
+# Doorbell rings may only target a camera destination (Answer opens its stream).
+DOORBELL_ALLOWED_DESTINATION = "security_camera"
 
 # --- Service schemas ---
 
@@ -76,6 +88,30 @@ SERVICE_LIST_DEEP_LINK_DESTINATIONS_SCHEMA = vol.Schema({})
 
 SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE_SCHEMA = vol.Schema(
     {vol.Required("payload"): vol.All(cv.string, vol.Length(min=1))}
+)
+
+SERVICE_RING_DOORBELL_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_ENTITY_ID): cv.entity_ids,
+        vol.Required("deep_link_destination"): vol.All(cv.string, vol.Length(min=1)),
+        # Free-text sound id: the app falls back to a default for anything it
+        # doesn't recognise, so we deliberately don't constrain it server-side.
+        vol.Optional("sound"): cv.string,
+        vol.Optional("volume"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+        vol.Optional("repeat", default=DOORBELL_REPEAT_DEFAULT): vol.All(
+            vol.Coerce(int), vol.Range(min=DOORBELL_REPEAT_MIN, max=DOORBELL_REPEAT_MAX)
+        ),
+    },
+    extra=vol.REMOVE_EXTRA,
+)
+
+# `action` is intentionally an unconstrained string (not an enum) so future actions
+# (e.g. snooze, forward) can be broadcast without releasing the companion apps.
+SERVICE_DOORBELL_ACTION_SCHEMA = vol.Schema(
+    {
+        vol.Required("event_id"): vol.All(cv.string, vol.Length(min=1)),
+        vol.Optional("action"): cv.string,
+    }
 )
 
 
@@ -313,6 +349,108 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         return {"destinations": destinations}
 
+    # --- ring_doorbell ---
+
+    async def handle_ring_doorbell(call: ServiceCall) -> None:
+        """Fire an in-app doorbell ring to each targeted person.
+
+        Fires one ``zendo_doorbell_ring`` per targeted profile (same recipient
+        model as ``send_notification``). The ``eventId`` is the chosen deep link
+        destination's id (stable per camera/doorbell, so a later stop correlates
+        across every device that rang), and the ``deepLink`` is that destination's
+        resolved link. Only ``security_camera`` destinations are allowed.
+        """
+        entity_ids: list[str] = call.data[ATTR_ENTITY_ID]
+        destination_id: str = call.data["deep_link_destination"]
+        sound: str | None = call.data.get("sound")
+        volume: int | None = call.data.get("volume")
+        repeat: int = call.data["repeat"]
+
+        # Resolve the deep link destination to its cached entry
+        entries = hass.config_entries.async_entries(DOMAIN)
+        if not entries:
+            raise HomeAssistantError("Zendo integration is not configured")
+
+        cached: list[dict] = entries[0].data.get(
+            CONF_CACHED_DEEP_LINK_DESTINATIONS, []
+        )
+        dest = next((d for d in cached if d.get("id") == destination_id), None)
+
+        if dest is None:
+            raise ServiceValidationError(
+                f"Deep link destination '{destination_id}' not found. "
+                "Use the list_deep_link_destinations service to see available IDs."
+            )
+
+        # Only camera destinations are allowed (Answer opens the camera stream)
+        if dest.get("destination") != DOORBELL_ALLOWED_DESTINATION:
+            raise ServiceValidationError(
+                "Doorbell rings can only target a security camera. "
+                f"'{destination_id}' is a '{dest.get('destination')}' destination."
+            )
+
+        deep_link_uri = dest.get("link")
+        if not deep_link_uri:
+            raise ServiceValidationError(
+                f"Deep link destination '{destination_id}' has no link."
+            )
+
+        # Resolve targeted notify entities to their profile IDs
+        entity_map: dict[str, str] = hass.data[DOMAIN].get("notify_entities", {})
+        profile_ids: list[str] = []
+
+        for entity_id in entity_ids:
+            profile_id = entity_map.get(entity_id)
+
+            if profile_id is None:
+                raise HomeAssistantError(
+                    f'Entity "{entity_id}" is not a Zendo notify entity. '
+                    "Please select a valid Zendo person."
+                )
+
+            if profile_id not in profile_ids:
+                profile_ids.append(profile_id)
+
+        if not profile_ids:
+            raise HomeAssistantError("No valid people targeted.")
+
+        # Fire one ring per targeted profile (same eventId/deepLink, different profileId)
+        for profile_id in profile_ids:
+            payload: dict = {
+                "eventId": destination_id,
+                "profileId": profile_id,
+                "deepLink": deep_link_uri,
+                "repeat": repeat,
+            }
+
+            if sound:
+                payload["sound"] = sound
+
+            if volume is not None:
+                payload["volume"] = volume
+
+            hass.bus.async_fire(
+                "zendo_doorbell_ring", {"payload": json.dumps(payload)}
+            )
+
+    # --- doorbell_action ---
+
+    async def handle_doorbell_action(call: ServiceCall) -> None:
+        """Broadcast a doorbell action to connected clients.
+
+        ``action`` is forwarded as-is (free string, not an enum) so future
+        actions can be introduced without releasing the companion apps. The app
+        types the known set (silence/answer/decline) and ignores anything else.
+        """
+        event_id: str = call.data["event_id"]
+        action: str | None = call.data.get("action")
+
+        payload: dict = {"eventId": event_id}
+        if action is not None:
+            payload["action"] = action
+
+        hass.bus.async_fire("zendo_doorbell_action", {"payload": json.dumps(payload)})
+
     # --- Register all services ---
 
     service_map = {
@@ -335,6 +473,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE: (
             handle_notify_site_config_manifest_update,
             SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE_SCHEMA,
+        ),
+        SERVICE_RING_DOORBELL: (
+            handle_ring_doorbell,
+            SERVICE_RING_DOORBELL_SCHEMA,
+        ),
+        SERVICE_DOORBELL_ACTION: (
+            handle_doorbell_action,
+            SERVICE_DOORBELL_ACTION_SCHEMA,
         ),
     }
 

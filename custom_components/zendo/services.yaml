@@ -2,7 +2,8 @@ setup_push_notifications:
   name: Set up push notifications
   description: >-
     Store the JWT token used to authenticate with the Zendo push notification
-    backend. This is typically called by the Zendo mobile app during setup.
+    backend. This is typically called by the Zendo mobile app during setup. 
+    This is an internal service and should not be called manually.
   fields:
     token:
       name: Token
@@ -59,7 +60,8 @@ send_notification:
 set_deep_link_destinations:
   name: Set deep link destinations
   description: >-
-    Store the list of deep link destinations from the Zendo mobile app.
+    Store the list of deep link destinations from the Zendo mobile app. This is
+    an internal service and should not be called manually.
   fields:
     destinations:
       name: Destinations
@@ -82,5 +84,97 @@ notify_site_config_manifest_update:
       name: Payload
       description: JSON string containing the site config manifest update metadata.
       required: true
+      selector:
+        text:
+
+ring_doorbell:
+  name: Ring doorbell
+  description: >-
+    Ring Zendo like a doorbell: shows an in-app alert and plays a ringtone. Only
+    rings while their Zendo app is open.
+  target:
+    entity:
+      domain: notify
+      integration: zendo
+  fields:
+    deep_link_destination:
+      name: Camera/Doorbell
+      description: >-
+        Required. The ID of a security camera deep link destination. The alert
+        shows this camera's snapshot and Answer opens its stream. Use the
+        list_deep_link_destinations service to see available IDs. Only security
+        camera/doorbell destinations are allowed.
+      required: true
+      selector:
+        text:
+    sound:
+      name: Ringtone
+      description: >-
+        Optional. The ringtone to play. Omit for a silent (visual-only) alert.
+      required: false
+      selector:
+        select:
+          custom_value: true
+          options:
+            - label: "Bells"
+              value: "bells"
+            - label: "Ding Dong"
+              value: "ding-dong"
+            - label: "Ding Dong 2"
+              value: "ding-dong-2"
+            - label: "Ding Dong 3"
+              value: "ding-dong-3"
+            - label: "Meditation Bell"
+              value: "meditation-bell"
+            - label: "Ring"
+              value: "ring"
+            - label: "Subtle"
+              value: "subtle"
+            - label: "Subtle 2"
+              value: "subtle-2"
+            - label: "Subtle 3"
+              value: "subtle-3"
+    volume:
+      name: Volume
+      description: >-
+        Optional. Device output volume (0-100) to set while ringing. Omit to
+        ring at the device's current volume.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          mode: slider
+          unit_of_measurement: "%"
+    repeat:
+      name: Repeat
+      description: >-
+        Optional. How many times to play the ringtone (1-5). Defaults to 1.
+      required: false
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 5
+          mode: box
+
+doorbell_action:
+  name: Doorbell action
+  description: >-
+    Broadcast a doorbell action to connected Zendo apps. This is an internal
+    service and should not be called manually.
+  fields:
+    event_id:
+      name: Event ID
+      description: >-
+        The ring's event ID.
+      required: true
+      selector:
+        text:
+    action:
+      name: Action
+      description: >-
+        Optional. The action that occurred.
+      required: false
       selector:
         text:

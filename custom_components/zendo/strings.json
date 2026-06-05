@@ -45,7 +45,7 @@
     },
     "set_deep_link_destinations": {
       "name": "Set deep link destinations",
-      "description": "Store the list of deep link destinations from the Zendo mobile app.",
+      "description": "Store the list of deep link destinations from the Zendo mobile app. This is an internal service and should not be called manually.",
       "fields": {
         "destinations": {
           "name": "Destinations",
@@ -56,6 +56,42 @@
     "list_deep_link_destinations": {
       "name": "List deep link destinations",
       "description": "List stored deep link destinations for use in automations."
+    },
+    "ring_doorbell": {
+      "name": "Ring doorbell",
+      "description": "Ring Zendo like a doorbell: shows an in-app alert and plays a ringtone. Only rings while their Zendo app is open.",
+      "fields": {
+        "deep_link_destination": {
+          "name": "Camera/Doorbell",
+          "description": "Required. The ID of a security camera deep link destination. The alert shows this camera's snapshot and Answer opens its stream. Use the list_deep_link_destinations service to see available IDs. Only security camera/doorbell destinations are allowed."
+        },
+        "sound": {
+          "name": "Ringtone",
+          "description": "Optional. The ringtone to play. Omit for a silent (visual-only) alert."
+        },
+        "volume": {
+          "name": "Volume",
+          "description": "Optional. Device output volume (0-100) to set while ringing. Omit to ring at the device's current volume."
+        },
+        "repeat": {
+          "name": "Repeat",
+          "description": "Optional. How many times to play the ringtone (1-5). Defaults to 1."
+        }
+      }
+    },
+    "doorbell_action": {
+      "name": "Doorbell action",
+      "description": "Broadcast a doorbell action to connected Zendo apps. This is an internal service and should not be called manually.",
+      "fields": {
+        "event_id": {
+          "name": "Event ID",
+          "description": "The ring's event ID."
+        },
+        "action": {
+          "name": "Action",
+          "description": "Optional. The action that occurred."
+        }
+      }
     }
   }
 }
