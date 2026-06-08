@@ -1,4 +1,4 @@
-"""Constants for the Zendo integration."""
+"""Constants for the integration."""
 
 import json
 from pathlib import Path

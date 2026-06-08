@@ -1,4 +1,4 @@
-"""GraphQL client for the Zendo control backend API.
+"""GraphQL client for the control backend API.
 
 Lightweight wrapper around aiohttp that handles authentication, service
 discovery, and the two GraphQL operations we need: fetching profiles and
@@ -42,7 +42,7 @@ mutation HASitePushNotificationSendToProfile($notifications: [SitePushNotificati
 
 
 def _build_headers(token: str) -> dict[str, str]:
-    """Build request headers matching the Zendo app's user-agent convention."""
+    """Build request headers matching the app's user-agent convention."""
     return {
         "Authorization": f"Bearer {token}",
         "Accept-Encoding": "gzip",

@@ -1,4 +1,4 @@
-"""The Zendo integration."""
+"""The integration."""
 
 import json
 import logging
@@ -24,7 +24,7 @@ from .const import (
     SIGNAL_CONFIG_UPDATED,
     SIGNAL_PROFILES_UPDATED,
 )
-from .notify import ZendoNotifyEntity
+from .notify import BNGntNotifyEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ def _build_notification(
 # ---------------------------------------------------------------------------
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Zendo from a config entry."""
+    """Set up from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {}
     hass.data[DOMAIN]["notify_entities"] = {}
@@ -210,7 +210,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if add_entities:
             add_entities(
                 [
-                    ZendoNotifyEntity(target_entry, p["id"], p["label"])
+                    BNGntNotifyEntity(target_entry, p["id"], p["label"])
                     for p in profiles
                 ],
                 update_before_add=True,
@@ -333,7 +333,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_notify_site_config_manifest_update(call: ServiceCall) -> None:
         """Broadcast a site config manifest update event to connected clients."""
         payload = call.data.get("payload")
-        hass.bus.async_fire("zendo_site_config_manifest_updated", {"payload": payload})
+        hass.bus.async_fire("bngnt_site_config_manifest_updated", {"payload": payload})
 
     # --- list_deep_link_destinations ---
 
@@ -354,7 +354,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_ring_doorbell(call: ServiceCall) -> None:
         """Fire an in-app doorbell ring to each targeted person.
 
-        Fires one ``zendo_doorbell_ring`` per targeted profile (same recipient
+        Fires one ``bngnt_doorbell_ring`` per targeted profile (same recipient
         model as ``send_notification``). The ``eventId`` is the chosen deep link
         destination's id (stable per camera/doorbell, so a later stop correlates
         across every device that rang), and the ``deepLink`` is that destination's
@@ -430,7 +430,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 payload["volume"] = volume
 
             hass.bus.async_fire(
-                "zendo_doorbell_ring", {"payload": json.dumps(payload)}
+                "bngnt_doorbell_ring", {"payload": json.dumps(payload)}
             )
 
     # --- doorbell_action ---
@@ -449,7 +449,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if action is not None:
             payload["action"] = action
 
-        hass.bus.async_fire("zendo_doorbell_action", {"payload": json.dumps(payload)})
+        hass.bus.async_fire("bngnt_doorbell_action", {"payload": json.dumps(payload)})
 
     # --- Register all services ---
 

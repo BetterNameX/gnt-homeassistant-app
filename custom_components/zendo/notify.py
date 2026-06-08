@@ -1,4 +1,4 @@
-"""Notify platform for Zendo.
+"""Notify platform.
 
 Creates a NotifyEntity per person/profile so that users can target them
 via both the built-in ``notify.send_message`` and the custom
@@ -39,7 +39,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Zendo notify entities from a config entry."""
+    """Set up notify entities from a config entry."""
     # Store the callback so __init__.py can add entities after a profile refresh
     hass.data[DOMAIN]["async_add_notify_entities"] = async_add_entities
 
@@ -48,13 +48,13 @@ async def async_setup_entry(
 
     if cached_profiles:
         async_add_entities(
-            [ZendoNotifyEntity(entry, p["id"], p["label"]) for p in cached_profiles],
+            [BNGntNotifyEntity(entry, p["id"], p["label"]) for p in cached_profiles],
             update_before_add=True,
         )
 
 
-class ZendoNotifyEntity(NotifyEntity):
-    """A notification target representing a single Zendo person/profile."""
+class BNGntNotifyEntity(NotifyEntity):
+    """A notification target representing a single person/profile."""
 
     _attr_has_entity_name = True
 
@@ -72,7 +72,7 @@ class ZendoNotifyEntity(NotifyEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Group under the shared Zendo device."""
+        """Group under the shared device."""
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.entry_id)},
             name="Zendo",

@@ -1,4 +1,4 @@
-"""Config flow for Zendo integration."""
+"""Config flow for the integration."""
 
 from typing import Any
 
@@ -9,8 +9,8 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from .const import DOMAIN
 
 
-class ZendoConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Zendo."""
+class BNGntConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow."""
 
     VERSION = 1
 

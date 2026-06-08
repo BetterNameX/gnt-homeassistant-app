@@ -1,4 +1,4 @@
-"""Binary sensor platform for Zendo."""
+"""Binary sensor platform."""
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -27,12 +27,12 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Zendo binary sensors from a config entry."""
-    async_add_entities([ZendoStatusBinarySensor(entry)])
+    """Set up binary sensors from a config entry."""
+    async_add_entities([BNGntStatusBinarySensor(entry)])
 
 
-class ZendoStatusBinarySensor(BinarySensorEntity):
-    """Binary sensor indicating whether the Zendo API is configured and available."""
+class BNGntStatusBinarySensor(BinarySensorEntity):
+    """Binary sensor indicating whether the API is configured and available."""
 
     _attr_has_entity_name = True
     _attr_name = "Status"
@@ -47,7 +47,7 @@ class ZendoStatusBinarySensor(BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return True — the Zendo API is available whenever the integration is loaded."""
+        """Return True - the API is available whenever the integration is loaded."""
         return True
 
     @property
@@ -68,7 +68,7 @@ class ZendoStatusBinarySensor(BinarySensorEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info to group entities under a single Zendo device."""
+        """Return device info to group entities under a single device."""
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.entry_id)},
             name="Zendo",

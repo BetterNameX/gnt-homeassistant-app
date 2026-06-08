@@ -1,6 +1,6 @@
-"""DNS-based service discovery for the Zendo control backend.
+"""DNS-based service discovery for the control backend.
 
-Port of the Zendo app's service-discovery/index.ts — resolves the control
+Port of the app's service-discovery/index.ts - resolves the control
 backend API URL from a DNS TXT record at
 control-backend.v1.sd.gnt.betterna.me.
 """

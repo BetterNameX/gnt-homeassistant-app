@@ -1,6 +1,6 @@
 """DNS over HTTPS (DoH) query utility with TTL-based caching.
 
-Port of the Zendo app's dns-txt-kv.ts — resolves DNS TXT records via DoH
+Port of the app's dns-txt-kv.ts - resolves DNS TXT records via DoH
 (Cloudflare, then Google) and caches results respecting the TTL embedded
 in the record's JSON payload.
 """
@@ -44,7 +44,7 @@ async def query_dns_txt(
 ) -> dict[str, Any]:
     """Query a DNS TXT record via DoH with TTL-based caching.
 
-    Mirrors the behaviour of the Zendo app's queryDnsWithCache:
+    Mirrors the behaviour of the app's queryDnsWithCache:
     1. Return cached data if still within TTL.
     2. Try to resolve via DoH (Cloudflare, then Google).
     3. Fall back to stale cached data on failure.
