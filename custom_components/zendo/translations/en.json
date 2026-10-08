@@ -10,6 +10,19 @@
       "already_configured": "Zendo is already configured."
     }
   },
+  "entity": {
+    "event": {
+      "device_group": {
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "ring": "Doorbell ring"
+            }
+          }
+        }
+      }
+    }
+  },
   "services": {
     "setup_push_notifications": {
       "name": "Set up push notifications [Internal]",
@@ -22,12 +35,12 @@
       }
     },
     "refresh_profiles": {
-      "name": "Refresh people",
-      "description": "Fetch the list of people from the Zendo backend and create notification entities."
+      "name": "Refresh people and device groups",
+      "description": "Fetch the people and device groups from the Zendo backend and create their entities: a notification entity for each person, and an event entity for each device group."
     },
     "send_notification": {
       "name": "Send notification",
-      "description": "Send a push notification to one or more Zendo people.",
+      "description": "Send a push notification to one or more Zendo people. Device groups can't receive push notifications.",
       "fields": {
         "message": {
           "name": "Message",
@@ -59,7 +72,7 @@
     },
     "ring_doorbell": {
       "name": "Ring doorbell",
-      "description": "Ring Zendo like a doorbell: shows an in-app alert and plays a ringtone. Only rings while their Zendo app is open.",
+      "description": "Ring Zendo like a doorbell for the people and device groups you target: shows an in-app alert and plays a ringtone. Only rings on their devices that have the Zendo app open in kiosk mode.",
       "fields": {
         "deep_link_destination": {
           "name": "Camera/Doorbell",

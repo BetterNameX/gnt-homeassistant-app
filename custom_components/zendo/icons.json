@@ -1,4 +1,11 @@
 {
+  "entity": {
+    "event": {
+      "device_group": {
+        "default": "mdi:tablet-dashboard"
+      }
+    }
+  },
   "services": {
     "setup_push_notifications": {
       "service": "mdi:key-variant"

@@ -20,6 +20,7 @@ from .const import (
     SIGNAL_CONFIG_UPDATED,
     SIGNAL_PROFILES_UPDATED,
 )
+from .profiles import device_groups, people
 
 
 async def async_setup_entry(
@@ -53,18 +54,18 @@ class BNGntStatusBinarySensor(BinarySensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        """Return API version, push notification status, and people list."""
+        """Return API version, push notification status, people and device groups."""
         token = self._entry.data.get(CONF_PUSH_NOTIFICATION_TOKEN)
         push_configured = isinstance(token, str) and len(token) > 0
 
-        profiles: list[dict[str, str]] = self._entry.data.get(CONF_CACHED_PROFILES, [])
-        people = [p["label"] for p in profiles]
+        profiles: list[dict] = self._entry.data.get(CONF_CACHED_PROFILES, [])
 
         return {
             "integration_version": INTEGRATION_VERSION,
             "api_version": API_VERSION,
             "push_notifications_configured": push_configured,
-            "people": people,
+            "people": [p["label"] for p in people(profiles)],
+            "device_groups": [p["label"] for p in device_groups(profiles)],
         }
 
     @property

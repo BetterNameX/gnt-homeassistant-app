@@ -25,6 +25,7 @@ from .const import (
     SIGNAL_CONFIG_UPDATED,
     SIGNAL_PROFILES_UPDATED,
 )
+from .event import BNGntDeviceGroupEventEntity
 from .managed_devices import (
     BNGntManagedDeviceRegistry,
     SERVICE_MANAGED_DEVICE_APP_LOCK_SCHEMA,
@@ -51,10 +52,21 @@ from .managed_devices import (
     handle_update_managed_device_state,
 )
 from .notify import BNGntNotifyEntity
+from .profiles import (
+    async_sync_profile_entities,
+    device_groups,
+    people,
+    profiles_predate_device_groups,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.NOTIFY, Platform.SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.EVENT,
+    Platform.NOTIFY,
+    Platform.SENSOR,
+]
 
 SECONDS_IN_DAY = 86400
 
@@ -220,6 +232,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {}
     hass.data[DOMAIN]["notify_entities"] = {}
+    hass.data[DOMAIN]["device_group_entities"] = {}
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -232,7 +245,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # --- Shared refresh logic ---
 
     async def _refresh_and_register(token: str) -> None:
-        """Fetch profiles from the backend and create notify entities."""
+        """Fetch profiles from the backend and sync their entities."""
         entries = hass.config_entries.async_entries(DOMAIN)
         target_entry = entries[0]
 
@@ -259,25 +272,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             },
         )
 
-        # Add new notify entities (HA deduplicates by unique_id)
-        add_entities = hass.data[DOMAIN].get("async_add_notify_entities")
-
-        if add_entities:
-            add_entities(
-                [
-                    BNGntNotifyEntity(target_entry, p["id"], p["label"])
-                    for p in profiles
-                ],
-                update_before_add=True,
-            )
+        await async_sync_profile_entities(
+            hass.data[DOMAIN]["notify_entities"],
+            people(profiles),
+            hass.data[DOMAIN].get("async_add_notify_entities"),
+            lambda p: BNGntNotifyEntity(target_entry, p["id"], p["label"]),
+        )
+        await async_sync_profile_entities(
+            hass.data[DOMAIN]["device_group_entities"],
+            device_groups(profiles),
+            hass.data[DOMAIN].get("async_add_device_group_entities"),
+            lambda p: BNGntDeviceGroupEventEntity(target_entry, p["id"], p["label"]),
+        )
 
         async_dispatcher_send(hass, SIGNAL_PROFILES_UPDATED)
         async_dispatcher_send(hass, SIGNAL_CONFIG_UPDATED)
 
+    async def _refresh_cached_profiles(token: str) -> None:
+        """Refresh the profile cache, logging rather than raising on failure."""
+        try:
+            await _refresh_and_register(token)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Couldn't refresh the cached profiles, will retry at the next start",
+                exc_info=True,
+            )
+
     # --- setup_push_notifications ---
 
     async def handle_setup_push_notifications(call: ServiceCall) -> None:
-        """Store the JWT token and refresh people."""
+        """Store the JWT token and refresh profiles."""
         token = call.data["token"]
 
         entries = hass.config_entries.async_entries(DOMAIN)
@@ -297,7 +321,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # --- refresh_profiles ---
 
     async def handle_refresh_profiles(call: ServiceCall) -> None:
-        """Fetch profiles from the backend and create notify entities."""
+        """Fetch profiles from the backend and sync their entities."""
         token = _get_token_or_raise(hass)
         await _refresh_and_register(token)
 
@@ -332,13 +356,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         deep_link_destination_id,
                     )
 
-        entity_map: dict[str, str] = hass.data[DOMAIN].get("notify_entities", {})
+        notify_entities: dict[str, BNGntNotifyEntity] = hass.data[DOMAIN].get(
+            "notify_entities", {}
+        )
+        device_group_entities: dict[str, BNGntDeviceGroupEventEntity] = hass.data[
+            DOMAIN
+        ].get("device_group_entities", {})
         notifications = []
 
         for entity_id in entity_ids:
-            profile_id = entity_map.get(entity_id)
+            if entity_id in device_group_entities:
+                raise ServiceValidationError(
+                    f'Entity "{entity_id}" is a Zendo device group. '
+                    "Device groups can't receive push notifications."
+                )
 
-            if profile_id is None:
+            notify_entity = notify_entities.get(entity_id)
+
+            if notify_entity is None:
                 raise HomeAssistantError(
                     f'Entity "{entity_id}" is not a Zendo notify entity. '
                     "Please select a valid Zendo person."
@@ -346,7 +381,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             notifications.append(
                 _build_notification(
-                    profile_id, message, interruption_level, deep_link_uri
+                    notify_entity.profile_id,
+                    message,
+                    interruption_level,
+                    deep_link_uri,
                 )
             )
 
@@ -407,13 +445,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # --- ring_doorbell ---
 
     async def handle_ring_doorbell(call: ServiceCall) -> None:
-        """Fire an in-app doorbell ring to each targeted person.
+        """Fire an in-app doorbell ring to each targeted person or device group.
 
-        Fires one ``bngnt_doorbell_ring`` per targeted profile (same recipient
-        model as ``send_notification``). The ``eventId`` is the chosen deep link
-        destination's id (stable per camera/doorbell, so a later stop correlates
-        across every device that rang), and the ``deepLink`` is that destination's
-        resolved link. Only ``security_camera`` destinations are allowed.
+        Targets are notify entities (people) and device group event entities.
+        Fires one ``bngnt_doorbell_ring`` per targeted profile. The ``eventId``
+        is the chosen deep link destination's id (stable per camera/doorbell, so
+        a later stop correlates across every device that rang), and the
+        ``deepLink`` is that destination's resolved link. Only
+        ``security_camera`` destinations are allowed.
         """
         entity_ids: list[str] = call.data[ATTR_ENTITY_ID]
         destination_id: str = call.data["deep_link_destination"]
@@ -450,24 +489,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 f"Deep link destination '{destination_id}' has no link."
             )
 
-        # Resolve targeted notify entities to their profile IDs
-        entity_map: dict[str, str] = hass.data[DOMAIN].get("notify_entities", {})
+        # Resolve targeted entities to their profile IDs
+        notify_entities: dict[str, BNGntNotifyEntity] = hass.data[DOMAIN].get(
+            "notify_entities", {}
+        )
+        device_group_entities: dict[str, BNGntDeviceGroupEventEntity] = hass.data[
+            DOMAIN
+        ].get("device_group_entities", {})
         profile_ids: list[str] = []
+        targeted_device_groups: list[BNGntDeviceGroupEventEntity] = []
 
         for entity_id in entity_ids:
-            profile_id = entity_map.get(entity_id)
+            target = notify_entities.get(entity_id) or device_group_entities.get(
+                entity_id
+            )
 
-            if profile_id is None:
-                raise HomeAssistantError(
-                    f'Entity "{entity_id}" is not a Zendo notify entity. '
-                    "Please select a valid Zendo person."
+            if target is None:
+                raise ServiceValidationError(
+                    f'Entity "{entity_id}" is not a Zendo person or device group. '
+                    "Please select a Zendo person or device group."
                 )
 
-            if profile_id not in profile_ids:
-                profile_ids.append(profile_id)
+            if isinstance(target, BNGntDeviceGroupEventEntity):
+                targeted_device_groups.append(target)
+
+            if target.profile_id not in profile_ids:
+                profile_ids.append(target.profile_id)
 
         if not profile_ids:
-            raise HomeAssistantError("No valid people targeted.")
+            raise ServiceValidationError("No people or device groups targeted.")
 
         # Fire one ring per targeted profile (same eventId/deepLink, different profileId)
         for profile_id in profile_ids:
@@ -487,6 +537,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.bus.async_fire(
                 "bngnt_doorbell_ring", {"payload": json.dumps(payload)}
             )
+
+        for device_group in targeted_device_groups:
+            device_group.async_record_ring(destination_id)
 
     # --- doorbell_action ---
 
@@ -612,6 +665,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 supports_response=response_mode,
             )
 
+    # --- Profiles cached before device groups ---
+
+    # A cache written before device groups can't tell one from a person, so the
+    # platforms have just set any device group up as a person. Refresh it in the
+    # background to move them to their own entities. A refreshed cache carries
+    # the flag, so this stops once a refresh succeeds.
+    token = entry.data.get(CONF_PUSH_NOTIFICATION_TOKEN)
+
+    if (
+        isinstance(token, str)
+        and token
+        and profiles_predate_device_groups(entry.data.get(CONF_CACHED_PROFILES, []))
+    ):
+        entry.async_create_background_task(
+            hass,
+            _refresh_cached_profiles(token),
+            "bngnt_refresh_cached_profiles",
+        )
+
     return True
 
 
@@ -630,6 +702,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id, None)
         hass.data[DOMAIN].pop("notify_entities", None)
         hass.data[DOMAIN].pop("async_add_notify_entities", None)
+        hass.data[DOMAIN].pop("device_group_entities", None)
+        hass.data[DOMAIN].pop("async_add_device_group_entities", None)
         hass.data[DOMAIN].pop("async_add_managed_device_sensors", None)
         hass.data[DOMAIN].pop("async_add_managed_device_binary_sensors", None)
         hass.data[DOMAIN].pop("managed_device_entities", None)

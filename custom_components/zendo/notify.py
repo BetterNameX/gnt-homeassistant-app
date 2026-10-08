@@ -1,8 +1,9 @@
 """Notify platform.
 
-Creates a NotifyEntity per person/profile so that users can target them
-via both the built-in ``notify.send_message`` and the custom
-``zendo.send_notification`` service.
+Creates a NotifyEntity per person so that users can target them via both
+the built-in ``notify.send_message`` and the custom
+``zendo.send_notification`` service. Device groups can't receive push
+notifications, so they get an event entity instead (see event.py).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from .const import (
     CONF_PUSH_NOTIFICATION_TOKEN,
     DOMAIN,
 )
+from .profiles import people
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,17 +46,17 @@ async def async_setup_entry(
     hass.data[DOMAIN]["async_add_notify_entities"] = async_add_entities
 
     # Create entities from cached profiles (no API call at boot)
-    cached_profiles: list[dict[str, str]] = entry.data.get(CONF_CACHED_PROFILES, [])
+    cached_people = people(entry.data.get(CONF_CACHED_PROFILES, []))
 
-    if cached_profiles:
+    if cached_people:
         async_add_entities(
-            [BNGntNotifyEntity(entry, p["id"], p["label"]) for p in cached_profiles],
+            [BNGntNotifyEntity(entry, p["id"], p["label"]) for p in cached_people],
             update_before_add=True,
         )
 
 
 class BNGntNotifyEntity(NotifyEntity):
-    """A notification target representing a single person/profile."""
+    """A notification target representing a single person."""
 
     _attr_has_entity_name = True
 
@@ -69,6 +71,11 @@ class BNGntNotifyEntity(NotifyEntity):
         self._profile_id = profile_id
         self._attr_name = label
         self._attr_unique_id = f"{entry.entry_id}_{profile_id}"
+
+    @property
+    def profile_id(self) -> str:
+        """Return the person's profile ID."""
+        return self._profile_id
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -94,11 +101,15 @@ class BNGntNotifyEntity(NotifyEntity):
         await send_notification(self.hass, token, [notification])
 
     async def async_added_to_hass(self) -> None:
-        """Register this entity in hass.data so the send_notification service can resolve it."""
-        entities: dict[str, str] = self.hass.data[DOMAIN].setdefault("notify_entities", {})
-        entities[self.entity_id] = self._profile_id
+        """Register this entity in hass.data so the services can resolve it."""
+        entities: dict[str, BNGntNotifyEntity] = self.hass.data[DOMAIN].setdefault(
+            "notify_entities", {}
+        )
+        entities[self.entity_id] = self
 
     async def async_will_remove_from_hass(self) -> None:
         """Deregister this entity from hass.data."""
-        entities: dict[str, str] = self.hass.data[DOMAIN].get("notify_entities", {})
+        entities: dict[str, BNGntNotifyEntity] = self.hass.data[DOMAIN].get(
+            "notify_entities", {}
+        )
         entities.pop(self.entity_id, None)

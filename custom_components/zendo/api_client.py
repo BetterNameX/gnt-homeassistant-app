@@ -17,6 +17,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import API_VERSION
+from .profiles import (
+    PROFILE_CAN_RECEIVE_PUSH_NOTIFICATIONS,
+    can_receive_push_notifications,
+)
 from .service_discovery import get_control_backend_url
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,6 +33,7 @@ query HASitePushNotificationControlBackendDetails {
         profiles {
             id
             label
+            canReceivePushNotifications
         }
     }
 }
@@ -85,12 +90,19 @@ async def _graphql_request(
 async def fetch_profiles(
     hass: HomeAssistant,
     token: str,
-) -> list[dict[str, str]]:
-    """Fetch the list of push notification profiles from the control backend."""
+) -> list[dict[str, Any]]:
+    """Fetch the site's people and device groups from the control backend."""
     data = await _graphql_request(hass, token, QUERY_PROFILES)
     profiles = data.get("res", {}).get("profiles", [])
 
-    return [{"id": p["id"], "label": p["label"]} for p in profiles]
+    return [
+        {
+            "id": p["id"],
+            "label": p["label"],
+            PROFILE_CAN_RECEIVE_PUSH_NOTIFICATIONS: can_receive_push_notifications(p),
+        }
+        for p in profiles
+    ]
 
 
 async def send_notification(
