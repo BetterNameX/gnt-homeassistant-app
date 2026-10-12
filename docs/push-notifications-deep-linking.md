@@ -2,13 +2,13 @@
 
 > **Note:** This document is intended as context for AI-assisted development. For user-facing documentation, see https://docs.myzendo.com
 
-Deep link destinations allow push notifications sent from Home Assistant automations to open a specific screen in the Zendo app when tapped. For example, a notification about motion on a camera can open that camera's live stream directly.
+Deep link destinations allow push notifications sent from Home Assistant automations to open a specific screen in the Zendo app when tapped. For example, a notification about motion on a camera can open that camera's live stream directly, and a notification that an alarm has gone off can open that alarm ready to disarm.
 
 ---
 
 ## How It Works
 
-1. The Zendo mobile app pushes a list of available destinations (cameras, etc.) into Home Assistant.
+1. The Zendo mobile app pushes a list of available destinations (cameras and security systems) into Home Assistant.
 2. Home Assistant stores this list locally.
 3. When creating an automation that sends a notification, you reference a destination by its ID.
 4. When the user taps the notification on their phone, the Zendo app opens the matching screen.
@@ -53,20 +53,38 @@ destinations:
     subtitle: "Camera/Doorbell"
     entityType: "security_camera"
     link: "Zendo:/deeplink-v1?dst=security_camera&id=def456"
+  - id: "securitySystem_ghi789"
+    destination: "security_system"
+    title: "House alarm"
+    subtitle: "Alarm"
+    entityType: "security_system"
+    link: "Zendo:/deeplink-v1?dst=security_system&id=ghi789"
 ```
 
 ### Field Reference
 
 
-| Field         | Description                                                                                     |
-| ------------- | ----------------------------------------------------------------------------------------------- |
-| `id`          | The stable identifier you use in automations. This is what you pass to `deep_link_destination`. |
-| `destination` | The type of destination (e.g. `security_camera`).                                               |
-| `title`       | Human-readable name of the destination (e.g. the camera's label).                               |
-| `subtitle`    | Secondary description (e.g. "Camera/Doorbell").                                                 |
-| `entityType`  | The entity category.                                                                            |
-| `link`        | The full deep link URI. You don't need to use this directly.                                    |
+| Field         | Description                                                                                               |
+| ------------- | --------------------------------------------------------------------------------------------------------- |
+| `id`          | The stable identifier you use in automations. This is what you pass to `deep_link_destination`.           |
+| `destination` | The type of destination (`security_camera` or `security_system`).                                         |
+| `title`       | Human-readable name of the destination (e.g. the camera's or the alarm's name).                           |
+| `subtitle`    | Secondary description (e.g. "Camera/Doorbell" or "Alarm"), in the language of the Zendo app that sent it. |
+| `entityType`  | The entity category.                                                                                      |
+| `link`        | The full deep link URI. You don't need to use this directly.                                              |
 
+### Destination Kinds
+
+
+| Kind            | `destination` / `entityType` | ID format             | Tapping the notification opens                                          |
+| --------------- | ---------------------------- | --------------------- | ----------------------------------------------------------------------- |
+| Camera/doorbell | `security_camera`            | `securityCamera_<id>` | That camera's live stream.                                              |
+| Security system | `security_system`            | `securitySystem_<id>` | Zendo's Security view, with that alarm's mode picker open to disarm it. |
+
+
+The `<id>` part is assigned by Zendo. Always copy the full `id` from `zendo.list_deep_link_destinations` rather than building it yourself (for example from a Home Assistant entity ID).
+
+The integration treats every kind the same way: `zendo.send_notification` accepts any destination ID. The one exception is `zendo.ring_doorbell`, which only accepts `security_camera` destinations and rejects a `security_system` ID with an error.
 
 ---
 
@@ -124,7 +142,7 @@ The `deep_link_destination` field is entirely optional. Omitting it sends a norm
 2. Select **Zendo: Send notification**.
 3. Pick the target entity (a Zendo person).
 4. Fill in the **Message**.
-5. Optionally fill in **Deep link destination** with the destination ID (e.g. `securityCamera_abc123`).
+5. Optionally fill in **Deep link destination** with the destination ID (e.g. `securityCamera_abc123` or `securitySystem_ghi789`).
 6. Click **Call Service**.
 
 ---
@@ -177,6 +195,46 @@ automation:
 2. Owner and Bob both receive a time-sensitive push notification: "Someone is at the door".
 3. They tap the notification.
 4. The Zendo app opens directly to the doorbell camera's live stream - they can immediately see who's there.
+
+---
+
+## Example: Alarm Triggered Notification with Security System Deep Link
+
+When an alarm goes off, the notification tells you it has been triggered, and tapping it opens that alarm in Zendo so you can disarm it.
+
+Find the alarm's destination ID first: call `zendo.list_deep_link_destinations` and copy the `id` of the entry whose `destination` is `security_system` and whose `title` is the alarm's name (e.g. `securitySystem_ghi789`). Don't try to build it from the `alarm_control_panel` entity ID.
+
+```yaml
+automation:
+  - alias: "House alarm triggered - notify household"
+    description: >-
+      When the house alarm is triggered, notify everyone with a critical
+      alert that bypasses Do Not Disturb. Tapping the notification opens
+      the alarm in Zendo, ready to disarm.
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.house
+        to: "triggered"
+    action:
+      - service: zendo.send_notification
+        target:
+          entity_id:
+            - notify.zendo_owner
+            - notify.zendo_bob
+        data:
+          message: "The house alarm has been triggered"
+          interruption_level: "critical"
+          deep_link_destination: "securitySystem_ghi789"
+```
+
+`interruption_level` accepts `time_sensitive` or `critical`. Use `time_sensitive` instead if the alert shouldn't break through Do Not Disturb.
+
+### What Happens
+
+1. The house alarm goes to `triggered`.
+2. Owner and Bob both receive a critical push notification: "The house alarm has been triggered".
+3. They tap the notification.
+4. The Zendo app opens its Security view with the house alarm's mode picker already open, so they can disarm it from there.
 
 ---
 
