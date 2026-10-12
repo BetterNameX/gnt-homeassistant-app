@@ -17,6 +17,7 @@ from .const import (
     CONF_CACHED_PROFILES,
     CONF_PUSH_NOTIFICATION_TOKEN,
     DOMAIN,
+    SERVICE_DEVICE_IDENTIFIER,
     SIGNAL_CONFIG_UPDATED,
     SIGNAL_PROFILES_UPDATED,
 )
@@ -45,7 +46,7 @@ class BNGntStatusBinarySensor(BinarySensorEntity):
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialise the sensor."""
         self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_status"
+        self._attr_unique_id = "status"
 
     @property
     def is_on(self) -> bool:
@@ -72,7 +73,7 @@ class BNGntStatusBinarySensor(BinarySensorEntity):
     def device_info(self) -> DeviceInfo:
         """Return device info to group entities under a single device."""
         return DeviceInfo(
-            identifiers={(DOMAIN, self._entry.entry_id)},
+            identifiers={(DOMAIN, SERVICE_DEVICE_IDENTIFIER)},
             name="Zendo",
             manufacturer="Zendo",
             entry_type=DeviceEntryType.SERVICE,

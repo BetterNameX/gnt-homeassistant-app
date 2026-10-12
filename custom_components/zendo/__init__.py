@@ -4,14 +4,22 @@ import json
 import logging
 import time
 from functools import partial
+from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api_client import fetch_profiles, send_notification
@@ -22,12 +30,16 @@ from .const import (
     CONF_REFRESH_TIMESTAMPS,
     DAILY_REFRESH_LIMIT,
     DOMAIN,
+    SERVICE_DEVICE_IDENTIFIER,
     SIGNAL_CONFIG_UPDATED,
     SIGNAL_PROFILES_UPDATED,
 )
 from .event import BNGntDeviceGroupEventEntity
 from .managed_devices import (
+    BNGntManagedDeviceError,
     BNGntManagedDeviceRegistry,
+    SERVICE_DELETE_MANAGED_DEVICE_SCHEMA,
+    SERVICE_LIST_MANAGED_DEVICES_SCHEMA,
     SERVICE_MANAGED_DEVICE_APP_LOCK_SCHEMA,
     SERVICE_MANAGED_DEVICE_APP_RELOAD_SCHEMA,
     SERVICE_MANAGED_DEVICE_APP_UNLOCK_SCHEMA,
@@ -37,8 +49,11 @@ from .managed_devices import (
     SERVICE_MANAGED_DEVICE_SCREEN_WAKE_UP_SCHEMA,
     SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE_SCHEMA,
     SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA,
+    SERVICE_REPLACE_MANAGED_DEVICE_SCHEMA,
     SERVICE_UNREGISTER_MANAGED_DEVICE_SCHEMA,
     SERVICE_UPDATE_MANAGED_DEVICE_STATE_SCHEMA,
+    handle_delete_managed_device,
+    handle_list_managed_devices,
     handle_managed_device_app_lock,
     handle_managed_device_app_reload,
     handle_managed_device_app_unlock,
@@ -48,6 +63,7 @@ from .managed_devices import (
     handle_managed_device_screen_wake_up,
     handle_managed_device_screensaver_configure,
     handle_register_managed_device,
+    handle_replace_managed_device,
     handle_unregister_managed_device,
     handle_update_managed_device_state,
 )
@@ -85,6 +101,9 @@ SERVICE_REGISTER_MANAGED_DEVICE = "register_managed_device"
 SERVICE_UNREGISTER_MANAGED_DEVICE = "unregister_managed_device"
 SERVICE_MANAGED_DEVICE_COMMAND_RESPONSE = "managed_device_command_response"
 SERVICE_UPDATE_MANAGED_DEVICE_STATE = "update_managed_device_state"
+SERVICE_LIST_MANAGED_DEVICES = "list_managed_devices"
+SERVICE_REPLACE_MANAGED_DEVICE = "replace_managed_device"
+SERVICE_DELETE_MANAGED_DEVICE = "delete_managed_device"
 SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE = "managed_device_screensaver_configure"
 SERVICE_MANAGED_DEVICE_SCREEN_CONFIGURE = "managed_device_screen_configure"
 SERVICE_MANAGED_DEVICE_SCREEN_WAKE_UP = "managed_device_screen_wake_up"
@@ -106,6 +125,9 @@ STATIC_SERVICES = [
     SERVICE_UNREGISTER_MANAGED_DEVICE,
     SERVICE_MANAGED_DEVICE_COMMAND_RESPONSE,
     SERVICE_UPDATE_MANAGED_DEVICE_STATE,
+    SERVICE_LIST_MANAGED_DEVICES,
+    SERVICE_REPLACE_MANAGED_DEVICE,
+    SERVICE_DELETE_MANAGED_DEVICE,
     SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE,
     SERVICE_MANAGED_DEVICE_SCREEN_CONFIGURE,
     SERVICE_MANAGED_DEVICE_SCREEN_WAKE_UP,
@@ -221,6 +243,72 @@ def _build_notification(
         }
 
     return notification
+
+
+# ---------------------------------------------------------------------------
+# Migration
+# ---------------------------------------------------------------------------
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate a config entry to the current version."""
+    if entry.version > 1:
+        return False
+
+    # Minor version 2: no unique ID or device identifier contains the entry
+    # ID, which a reinstall changes. Each step skips what's already done, so
+    # running it twice is safe.
+    if entry.minor_version < 2:
+        ent_reg = er.async_get(hass)
+        prefix = f"{entry.entry_id}_"
+
+        @callback
+        def _strip_entry_id(
+            entity_entry: er.RegistryEntry,
+        ) -> dict[str, Any] | None:
+            if not entity_entry.unique_id.startswith(prefix):
+                return None
+
+            new_unique_id = entity_entry.unique_id.removeprefix(prefix)
+            if ent_reg.async_get_entity_id(entity_entry.domain, DOMAIN, new_unique_id):
+                _LOGGER.warning(
+                    "Can't migrate %s to unique ID %s, which another entity has",
+                    entity_entry.entity_id,
+                    new_unique_id,
+                )
+                return None
+
+            return {"new_unique_id": new_unique_id}
+
+        await er.async_migrate_entries(hass, entry.entry_id, _strip_entry_id)
+        _move_service_device(hass, entry)
+        hass.config_entries.async_update_entry(entry, minor_version=2)
+
+    return True
+
+
+@callback
+def _move_service_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Move the service device from the entry ID to its own identifier.
+
+    Changing only the entities' DeviceInfo would add a second service device
+    beside this one.
+    """
+    dev_reg = dr.async_get(hass)
+    old_device = dev_reg.async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    if old_device is None:
+        return
+
+    if dev_reg.async_get_device(identifiers={(DOMAIN, SERVICE_DEVICE_IDENTIFIER)}):
+        _LOGGER.warning(
+            "Can't move device %s to identifier %s, which another device has",
+            old_device.id,
+            SERVICE_DEVICE_IDENTIFIER,
+        )
+        return
+
+    dev_reg.async_update_device(
+        old_device.id, new_identifiers={(DOMAIN, SERVICE_DEVICE_IDENTIFIER)}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +744,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SERVICE_UPDATE_MANAGED_DEVICE_STATE_SCHEMA,
             SupportsResponse.OPTIONAL,
         ),
+        SERVICE_LIST_MANAGED_DEVICES: (
+            partial(handle_list_managed_devices, hass),
+            SERVICE_LIST_MANAGED_DEVICES_SCHEMA,
+            SupportsResponse.ONLY,
+        ),
+        SERVICE_REPLACE_MANAGED_DEVICE: (
+            partial(handle_replace_managed_device, hass),
+            SERVICE_REPLACE_MANAGED_DEVICE_SCHEMA,
+            SupportsResponse.ONLY,
+        ),
+        SERVICE_DELETE_MANAGED_DEVICE: (
+            partial(handle_delete_managed_device, hass),
+            SERVICE_DELETE_MANAGED_DEVICE_SCHEMA,
+            SupportsResponse.OPTIONAL,
+        ),
     }
 
     for name, (handler, schema, response_mode) in responsive_services.items():
@@ -683,6 +786,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _refresh_cached_profiles(token),
             "bngnt_refresh_cached_profiles",
         )
+
+    return True
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Allow the Delete button on an offline managed device.
+
+    On True, HA removes the device and its entities itself.
+    """
+    if (DOMAIN, SERVICE_DEVICE_IDENTIFIER) in device_entry.identifiers:
+        return False
+
+    registry: BNGntManagedDeviceRegistry | None = hass.data.get(DOMAIN, {}).get(
+        "managed_device_registry"
+    )
+    if registry is None:
+        return False
+
+    key = registry.resolve_ha_device_to_key(device_entry.id)
+    if key is None:
+        return True
+
+    try:
+        registry.delete_device(key, remove_ha_device=False)
+    except BNGntManagedDeviceError as err:
+        raise HomeAssistantError(
+            "This device is online. "
+            "Turn off Always-On Display or sign it out of Zendo first."
+        ) from err
 
     return True
 

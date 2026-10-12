@@ -18,6 +18,10 @@ CONF_CACHED_PROFILES = "cached_profiles"
 CONF_CACHED_DEEP_LINK_DESTINATIONS = "cached_deep_link_destinations"
 CONF_MANAGED_DEVICES = "managed_devices"
 
+# The identifier of the HA device that groups the status sensor, people and
+# device groups. Never a valid managed device ID.
+SERVICE_DEVICE_IDENTIFIER = "service"
+
 SIGNAL_CONFIG_UPDATED = f"{DOMAIN}_config_updated"
 SIGNAL_PROFILES_UPDATED = f"{DOMAIN}_profiles_updated"
 

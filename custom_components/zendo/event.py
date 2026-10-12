@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_CACHED_PROFILES, DOMAIN
+from .const import CONF_CACHED_PROFILES, DOMAIN, SERVICE_DEVICE_IDENTIFIER
 from .profiles import device_groups
 
 EVENT_TYPE_RING = "ring"
@@ -57,7 +57,7 @@ class BNGntDeviceGroupEventEntity(EventEntity):
         self._entry = entry
         self._profile_id = profile_id
         self._attr_name = label
-        self._attr_unique_id = f"{entry.entry_id}_{profile_id}"
+        self._attr_unique_id = profile_id
         self._attr_event_types = [EVENT_TYPE_RING]
 
     @property
@@ -69,7 +69,7 @@ class BNGntDeviceGroupEventEntity(EventEntity):
     def device_info(self) -> DeviceInfo:
         """Group under the shared device."""
         return DeviceInfo(
-            identifiers={(DOMAIN, self._entry.entry_id)},
+            identifiers={(DOMAIN, SERVICE_DEVICE_IDENTIFIER)},
             name="Zendo",
             manufacturer="Zendo",
             entry_type=DeviceEntryType.SERVICE,

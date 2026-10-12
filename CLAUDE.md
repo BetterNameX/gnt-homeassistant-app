@@ -9,3 +9,6 @@ Read these files for project details:
 
 - [docs/push-notifications-deep-linking.md](docs/push-notifications-deep-linking.md): push
   notifications and their deep links.
+- [docs/managed-devices.md](docs/managed-devices.md): managed devices (Always-On Display):
+  records and their opaque managed device IDs, replacing and deleting a device, the Delete
+  button, and the migration to config entry minor version 2.

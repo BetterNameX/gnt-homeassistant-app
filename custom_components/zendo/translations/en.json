@@ -108,7 +108,7 @@
     },
     "register_managed_device": {
       "name": "Register managed device [Internal]",
-      "description": "Register a managed Zendo device. Creates or updates the device in the Home Assistant device registry and its sensor entities. This is an internal service called by the Zendo app and should not be called manually.",
+      "description": "Register a managed Zendo device and respond with its managed device ID. Creates or updates the device in the Home Assistant device registry and its sensor entities. This is an internal service called by the Zendo app and should not be called manually.",
       "fields": {
         "profile_id": {
           "name": "Profile ID",
@@ -141,12 +141,16 @@
         "app_version": {
           "name": "App version",
           "description": "Required. The Zendo app version running on the device."
+        },
+        "managed_device_id": {
+          "name": "Managed device ID",
+          "description": "Optional. The managed device ID to use if no managed device is attached to this device yet and the ID is free. Otherwise it's ignored."
         }
       }
     },
     "unregister_managed_device": {
       "name": "Unregister managed device [Internal]",
-      "description": "Mark a managed device as unavailable. The device and its entities remain in Home Assistant but show as unavailable. This is an internal service called by the Zendo app and should not be called manually.",
+      "description": "Mark a managed device as unavailable. The device and its entities remain in Home Assistant but show as unavailable. Responds with whether a managed device is attached to this device. This is an internal service called by the Zendo app and should not be called manually.",
       "fields": {
         "profile_id": {
           "name": "Profile ID",
@@ -178,7 +182,7 @@
     },
     "update_managed_device_state": {
       "name": "Update managed device state [Internal]",
-      "description": "Push a state update from a managed device. Updates the device's sensor entities and resets its online timer. This is an internal service called by the Zendo app and should not be called manually.",
+      "description": "Push a state update from a managed device. Updates the device's sensor entities and resets its online timer. Responds with whether a managed device is attached to this device. This is an internal service called by the Zendo app and should not be called manually.",
       "fields": {
         "profile_id": {
           "name": "Profile ID",
@@ -191,6 +195,38 @@
         "state": {
           "name": "State",
           "description": "Required. JSON-stringified device state object."
+        }
+      }
+    },
+    "list_managed_devices": {
+      "name": "List managed devices [Internal]",
+      "description": "List the managed devices, with the Zendo device attached to each and whether it's online. This is an internal service called by the Zendo app and should not be called manually."
+    },
+    "replace_managed_device": {
+      "name": "Replace managed device [Internal]",
+      "description": "Attach this device to another managed device, so automations that control that managed device control this device instead. This device's own managed device is removed. This is an internal service called by the Zendo app and should not be called manually.",
+      "fields": {
+        "profile_id": {
+          "name": "Profile ID",
+          "description": "Required. The profile ID that owns this device."
+        },
+        "device_id": {
+          "name": "Device ID",
+          "description": "Required. The unique device identifier."
+        },
+        "managed_device_id": {
+          "name": "Managed device ID",
+          "description": "Required. The managed device to take over."
+        }
+      }
+    },
+    "delete_managed_device": {
+      "name": "Delete managed device [Internal]",
+      "description": "Remove an offline managed device and its entities. A managed device that's online can't be removed. This is an internal service called by the Zendo app and should not be called manually.",
+      "fields": {
+        "managed_device_id": {
+          "name": "Managed device ID",
+          "description": "Required. The managed device to remove."
         }
       }
     },

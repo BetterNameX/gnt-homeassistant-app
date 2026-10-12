@@ -22,6 +22,7 @@ from .const import (
     CONF_CACHED_PROFILES,
     CONF_PUSH_NOTIFICATION_TOKEN,
     DOMAIN,
+    SERVICE_DEVICE_IDENTIFIER,
 )
 from .profiles import people
 
@@ -70,7 +71,7 @@ class BNGntNotifyEntity(NotifyEntity):
         self._entry = entry
         self._profile_id = profile_id
         self._attr_name = label
-        self._attr_unique_id = f"{entry.entry_id}_{profile_id}"
+        self._attr_unique_id = profile_id
 
     @property
     def profile_id(self) -> str:
@@ -81,7 +82,7 @@ class BNGntNotifyEntity(NotifyEntity):
     def device_info(self) -> DeviceInfo:
         """Group under the shared device."""
         return DeviceInfo(
-            identifiers={(DOMAIN, self._entry.entry_id)},
+            identifiers={(DOMAIN, SERVICE_DEVICE_IDENTIFIER)},
             name="Zendo",
             manufacturer="Zendo",
             entry_type=DeviceEntryType.SERVICE,
