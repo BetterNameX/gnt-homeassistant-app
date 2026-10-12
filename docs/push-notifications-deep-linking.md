@@ -2,7 +2,7 @@
 
 > **Note:** This document is intended as context for AI-assisted development. For user-facing documentation, see https://docs.myzendo.com
 
-Deep link destinations allow push notifications sent from Home Assistant automations to open a specific screen in the Zendo app when tapped. For example, a notification about motion on a camera can open that camera's live stream directly, and a notification that an alarm has gone off can open that alarm ready to disarm.
+Deep link destinations allow push notifications sent from Home Assistant automations to open a specific screen in the Zendo app when tapped. For example, a notification about motion on a camera can open that camera's live stream directly, and a notification that an alarm has been triggered can open that alarm ready to disarm.
 
 ---
 
@@ -79,7 +79,7 @@ destinations:
 | Kind            | `destination` / `entityType` | ID format             | Tapping the notification opens                                          |
 | --------------- | ---------------------------- | --------------------- | ----------------------------------------------------------------------- |
 | Camera/doorbell | `security_camera`            | `securityCamera_<id>` | That camera's live stream.                                              |
-| Security system | `security_system`            | `securitySystem_<id>` | Zendo's Security view, with that alarm's mode picker open to disarm it. |
+| Security system | `security_system`            | `securitySystem_<id>` | The alarm's own screen in Zendo, ready to disarm it. |
 
 
 The `<id>` part is assigned by Zendo. Always copy the full `id` from `zendo.list_deep_link_destinations` rather than building it yourself (for example from a Home Assistant entity ID).
@@ -200,7 +200,7 @@ automation:
 
 ## Example: Alarm Triggered Notification with Security System Deep Link
 
-When an alarm goes off, the notification tells you it has been triggered, and tapping it opens that alarm in Zendo so you can disarm it.
+When an alarm is triggered, the notification tells you, and tapping it opens that alarm in Zendo so you can disarm it.
 
 Find the alarm's destination ID first: call `zendo.list_deep_link_destinations` and copy the `id` of the entry whose `destination` is `security_system` and whose `title` is the alarm's name (e.g. `securitySystem_ghi789`). Don't try to build it from the `alarm_control_panel` entity ID.
 
@@ -234,7 +234,7 @@ automation:
 1. The house alarm goes to `triggered`.
 2. Owner and Bob both receive a critical push notification: "The house alarm has been triggered".
 3. They tap the notification.
-4. The Zendo app opens its Security view with the house alarm's mode picker already open, so they can disarm it from there.
+4. The Zendo app opens the house alarm's own screen, so they can disarm it from there.
 
 ---
 
