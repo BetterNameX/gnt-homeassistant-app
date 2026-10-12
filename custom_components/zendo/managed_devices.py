@@ -51,7 +51,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -361,7 +361,7 @@ class BNGntManagedDeviceRegistry:
                 "state": {},
                 "ha_device_id": ha_device.id,
             }
-            self._create_entities(uid)
+            self._create_entities(uid, available=True)
         else:
             dev = self._devices[uid]
             dev.update(
@@ -528,9 +528,10 @@ class BNGntManagedDeviceRegistry:
 
     # -- internal ------------------------------------------------------------
 
+    @callback
     def _check_offline(self, _now) -> None:
         threshold = time.time() - OFFLINE_TIMEOUT
-        for uid, device in self._devices.items():
+        for uid, device in list(self._devices.items()):
             if device["online"] and device["last_seen"] < threshold:
                 _LOGGER.info("Managed device %s went offline", uid)
                 device["online"] = False
@@ -557,10 +558,9 @@ class BNGntManagedDeviceRegistry:
             "ha_device_id": ha_device.id,
         }
 
-        self._create_entities(uid)
-        self._set_entities_available(uid, False)
+        self._create_entities(uid, available=False)
 
-    def _create_entities(self, uid: str) -> None:
+    def _create_entities(self, uid: str, available: bool) -> None:
         device = self._devices[uid]
 
         add_sensors = self._hass.data[DOMAIN].get(
@@ -574,7 +574,7 @@ class BNGntManagedDeviceRegistry:
             add_sensors(
                 [
                     BNGntManagedDeviceSensor(
-                        self._entry, uid, device, key, prop, self
+                        self._entry, uid, device, key, prop, self, available
                     )
                     for key, prop in SENSOR_PROPERTIES.items()
                 ],
@@ -585,7 +585,7 @@ class BNGntManagedDeviceRegistry:
             add_binary_sensors(
                 [
                     BNGntManagedDeviceBinarySensor(
-                        self._entry, uid, device, key, prop, self
+                        self._entry, uid, device, key, prop, self, available
                     )
                     for key, prop in BINARY_SENSOR_PROPERTIES.items()
                 ],
@@ -666,11 +666,12 @@ class BNGntManagedDeviceSensor(SensorEntity):
         prop_key: str,
         prop_def: dict,
         registry: BNGntManagedDeviceRegistry,
+        available: bool,
     ) -> None:
         self._uid = uid
         self._registry = registry
         self._state_key = prop_def["state_key"]
-        self._device_available = True
+        self._device_available = available
 
         self._attr_unique_id = f"{entry.entry_id}_md_{uid}_{prop_key}"
         self._attr_name = prop_def["name"]
@@ -737,12 +738,13 @@ class BNGntManagedDeviceBinarySensor(BinarySensorEntity):
         prop_key: str,
         prop_def: dict,
         registry: BNGntManagedDeviceRegistry,
+        available: bool,
     ) -> None:
         self._uid = uid
         self._prop_key = prop_key
         self._registry = registry
         self._state_key = prop_def["state_key"]
-        self._device_available = True
+        self._device_available = available
 
         self._attr_unique_id = f"{entry.entry_id}_md_{uid}_{prop_key}"
         self._attr_name = prop_def["name"]
