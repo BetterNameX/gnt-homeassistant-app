@@ -32,12 +32,20 @@ calls the service once per device. Each call gets its own ``id`` and
 Device state: the app pushes a full state snapshot every 60s (heartbeat)
 and on any value change via ``update_managed_device_state``. If 3
 consecutive heartbeats are missed (180s), the device is marked offline
-and all its entities become unavailable.
+with ``offline_reason`` ``timeout`` and all its entities become
+unavailable. ``unregister_managed_device`` marks it offline with
+``unregistered``.
 
-Persistence: each record's metadata and ``last_seen`` (not its runtime
-state) are stored in the config entry so entities survive HA restarts. On
-boot, entities are restored as unavailable until the device reconnects
-and re-registers.
+Persistence: each record's metadata, ``offline_reason`` and ``last_seen``
+(not its runtime state) are stored in the config entry so entities survive
+HA restarts. ``last_seen`` is also written when HA stops, so it keeps the
+last heartbeat across a restart. On boot, entities are restored as
+unavailable until the device reconnects and re-registers.
+
+Status events: ``bngnt_managed_device_updated`` carries a record exactly as
+``list_managed_devices`` lists it, and ``bngnt_managed_device_removed``
+carries the ``managed_device_id`` of a record that's gone. The app listens
+to them while it shows device status.
 """
 
 from __future__ import annotations
@@ -48,7 +56,7 @@ import logging
 import time
 import uuid
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 import voluptuous as vol
 
@@ -61,7 +69,14 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import (
+    CALLBACK_TYPE,
+    Event,
+    HomeAssistant,
+    ServiceCall,
+    callback,
+)
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -84,6 +99,19 @@ ERROR_CALLER_NOT_REGISTERED = "caller_not_registered"
 ERROR_TARGET_NOT_FOUND = "target_not_found"
 ERROR_TARGET_ONLINE = "target_online"
 
+# Why a record is offline. A plain string on the wire, so a hub can add a
+# reason without an app release. The registry only writes these, and the app
+# and the Homey app know the same ones, so keep all three in sync.
+OFFLINE_REASON_TIMEOUT = "timeout"
+OFFLINE_REASON_UNREGISTERED = "unregistered"
+OFFLINE_REASONS = (OFFLINE_REASON_TIMEOUT, OFFLINE_REASON_UNREGISTERED)
+
+OfflineReason = Literal["timeout", "unregistered"]
+
+# The app subscribes to these by name, and the Homey app emits the same ones.
+EVENT_MANAGED_DEVICE_UPDATED = "bngnt_managed_device_updated"
+EVENT_MANAGED_DEVICE_REMOVED = "bngnt_managed_device_removed"
+
 # What a takeover copies from the caller's record into the target's.
 _ATTACHED_DEVICE_FIELDS = (
     "profile_id",
@@ -93,9 +121,11 @@ _ATTACHED_DEVICE_FIELDS = (
     "device_type",
     "device_model_name",
     "device_os",
+    "device_os_version",
     "app_version",
     "state",
     "online",
+    "offline_reason",
     "last_seen",
 )
 
@@ -212,6 +242,7 @@ SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA = vol.Schema(
         vol.Required("device_type"): vol.All(cv.string, vol.Length(min=1)),
         vol.Required("device_model_name"): vol.Any(None, cv.string),
         vol.Required("device_os"): vol.All(cv.string, vol.Length(min=1)),
+        vol.Optional("device_os_version"): vol.Any(None, cv.string),
         vol.Required("app_version"): vol.All(cv.string, vol.Length(min=1)),
         vol.Optional("managed_device_id"): _managed_device_id_hint,
     },
@@ -350,6 +381,59 @@ def _epoch_ms(timestamp: float | None) -> int | None:
     return int(timestamp * 1000) if timestamp else None
 
 
+class BNGntManagedDeviceRecord(TypedDict):
+    """A managed device's record, keyed by its managed device ID."""
+
+    profile_id: str
+    device_id: str
+    device_name: str
+    device_brand: str | None
+    device_type: str
+    device_model_name: str | None
+    device_os: str
+    device_os_version: str | None
+    app_version: str | None
+    state: dict[str, Any]
+    online: bool
+    offline_reason: OfflineReason | None
+    # Unix seconds, or None for a record restored from before 1.9.0 whose
+    # device hasn't been seen since.
+    last_seen: float | None
+    ha_device_id: str | None
+
+
+def _serialize_managed_device(
+    hass: HomeAssistant, key: str, device: BNGntManagedDeviceRecord
+) -> dict[str, Any]:
+    """Return a record as ``list_managed_devices`` lists it.
+
+    ``bngnt_managed_device_updated`` carries exactly this, so the app parses
+    both with the same schema.
+    """
+    ha_device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, key)})
+    return {
+        "managed_device_id": key,
+        "profile_id": device["profile_id"],
+        "device_id": device["device_id"],
+        "device_name": device["device_name"],
+        "name_by_user": ha_device.name_by_user if ha_device else None,
+        "device_brand": device.get("device_brand"),
+        "device_type": device.get("device_type"),
+        "device_model_name": device.get("device_model_name"),
+        "device_os": device.get("device_os"),
+        "device_os_version": device.get("device_os_version"),
+        "app_version": device.get("app_version"),
+        "online": device["online"],
+        "offline_reason": None if device["online"] else device.get("offline_reason"),
+        "last_seen": _epoch_ms(device.get("last_seen")),
+        "state": device["state"] or None,
+    }
+
+
+def _without_wifi_signal(state: dict) -> dict:
+    return {k: v for k, v in state.items() if k != "wifi_signal"}
+
+
 class BNGntManagedDeviceRegistry:
     """Tracks managed devices, the device attached to each, and online status.
 
@@ -359,9 +443,10 @@ class BNGntManagedDeviceRegistry:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._hass = hass
         self._entry = entry
-        self._devices: dict[str, dict] = {}
+        self._devices: dict[str, BNGntManagedDeviceRecord] = {}
         self._pending_commands: dict[str, asyncio.Future] = {}
         self._offline_check_unsub: callable | None = None
+        self._ha_stop_unsub: CALLBACK_TYPE | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -374,28 +459,47 @@ class BNGntManagedDeviceRegistry:
         self._offline_check_unsub = async_track_time_interval(
             self._hass, self._check_offline, timedelta(seconds=60)
         )
+        self._ha_stop_unsub = self._hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP, self._persist_on_ha_stop
+        )
 
     def stop(self) -> None:
-        """Stop the offline checker and cancel pending commands."""
+        """Stop the offline checker, persist, and cancel pending commands."""
         if self._offline_check_unsub:
             self._offline_check_unsub()
             self._offline_check_unsub = None
+
+        if self._ha_stop_unsub:
+            self._ha_stop_unsub()
+            self._ha_stop_unsub = None
+
+        # A reload restores each record from the config entry, as a restart
+        # does, so last_seen is written here as well as on HA stop.
+        self._persist_devices()
 
         for future in self._pending_commands.values():
             if not future.done():
                 future.cancel()
         self._pending_commands.clear()
 
+    @callback
+    def _persist_on_ha_stop(self, _event: Event) -> None:
+        # Removing a once-listener after it has fired logs an error.
+        self._ha_stop_unsub = None
+        # Heartbeats update last_seen only in memory. The config entry store
+        # writes this at final write, after every stop listener has run.
+        self._persist_devices()
+
     # -- public API ----------------------------------------------------------
 
     @property
-    def devices(self) -> dict[str, dict]:
+    def devices(self) -> dict[str, BNGntManagedDeviceRecord]:
         return self._devices
 
-    def get_device(self, key: str) -> dict | None:
+    def get_device(self, key: str) -> BNGntManagedDeviceRecord | None:
         return self._devices.get(key)
 
-    def list_devices(self) -> list[tuple[str, dict]]:
+    def list_devices(self) -> list[tuple[str, BNGntManagedDeviceRecord]]:
         """Return each managed device ID with its record."""
         return list(self._devices.items())
 
@@ -408,6 +512,7 @@ class BNGntManagedDeviceRegistry:
         device_type: str,
         device_model_name: str | None,
         device_os: str,
+        device_os_version: str | None,
         app_version: str,
         managed_device_id: str | None = None,
     ) -> str:
@@ -433,8 +538,10 @@ class BNGntManagedDeviceRegistry:
             "device_type": device_type,
             "device_model_name": device_model_name,
             "device_os": device_os,
+            "device_os_version": device_os_version,
             "app_version": app_version,
             "online": True,
+            "offline_reason": None,
             "last_seen": time.time(),
         }
 
@@ -455,6 +562,7 @@ class BNGntManagedDeviceRegistry:
             self._set_entities_available(key, True)
 
         self._persist_devices()
+        self._fire_updated(key)
         return key
 
     def unregister_device(self, profile_id: str, device_id: str) -> bool:
@@ -470,11 +578,21 @@ class BNGntManagedDeviceRegistry:
             return False
 
         device = self._devices[key]
+        # A record that already timed out still takes the reason, so the app
+        # shows it as no longer monitored rather than as lost.
+        changed = (
+            device["online"]
+            or device.get("offline_reason") != OFFLINE_REASON_UNREGISTERED
+        )
         if device["online"]:
             device["online"] = False
             device["last_seen"] = time.time()
             self._set_entities_available(key, False)
+        device["offline_reason"] = OFFLINE_REASON_UNREGISTERED
+
+        if changed:
             self._persist_devices()
+            self._fire_updated(key)
         return True
 
     def update_state(self, profile_id: str, device_id: str, state: dict) -> bool:
@@ -494,9 +612,11 @@ class BNGntManagedDeviceRegistry:
 
         device = self._devices[key]
         was_offline = not device["online"]
+        old_state = device["state"]
         device["state"] = state
         device["last_seen"] = time.time()
         device["online"] = True
+        device["offline_reason"] = None
 
         if "app_version" in state and state["app_version"] != device.get("app_version"):
             device["app_version"] = state["app_version"]
@@ -511,6 +631,16 @@ class BNGntManagedDeviceRegistry:
             self._persist_devices()
 
         self._update_entity_values(key)
+
+        # The Wi-Fi signal drifts from one heartbeat to the next, so a change
+        # in it alone fires no event: the app reads it from the list. The
+        # Homey app follows the same rule.
+        if (
+            was_offline
+            or not old_state
+            or _without_wifi_signal(old_state) != _without_wifi_signal(state)
+        ):
+            self._fire_updated(key)
         return True
 
     def replace_device(
@@ -551,6 +681,8 @@ class BNGntManagedDeviceRegistry:
         self._set_entities_available(managed_device_id, target["online"])
         self._update_entity_values(managed_device_id)
         self._persist_devices()
+        self._fire_removed(caller_key)
+        self._fire_updated(managed_device_id)
         return managed_device_id, previous_device_name
 
     def delete_device(self, key: str, *, remove_ha_device: bool = True) -> bool:
@@ -571,6 +703,7 @@ class BNGntManagedDeviceRegistry:
         if remove_ha_device:
             self._remove_ha_device(key)
         self._persist_devices()
+        self._fire_removed(key)
         return True
 
     async def send_command(
@@ -743,24 +876,49 @@ class BNGntManagedDeviceRegistry:
                 ha_device.id, remove_config_entry_id=self._entry.entry_id
             )
 
+    def _fire_updated(self, key: str) -> None:
+        self._hass.bus.async_fire(
+            EVENT_MANAGED_DEVICE_UPDATED,
+            _serialize_managed_device(self._hass, key, self._devices[key]),
+        )
+
+    def _fire_removed(self, key: str) -> None:
+        self._hass.bus.async_fire(
+            EVENT_MANAGED_DEVICE_REMOVED, {"managed_device_id": key}
+        )
+
     @callback
     def _check_offline(self, _now) -> None:
         threshold = time.time() - OFFLINE_TIMEOUT
-        went_offline = False
+        went_offline: list[str] = []
         for key, device in list(self._devices.items()):
             if device["online"] and device["last_seen"] < threshold:
                 _LOGGER.info("Managed device %s went offline", key)
+                # last_seen stays at the last heartbeat.
                 device["online"] = False
+                device["offline_reason"] = OFFLINE_REASON_TIMEOUT
                 self._set_entities_available(key, False)
-                went_offline = True
+                went_offline.append(key)
 
         if went_offline:
             self._persist_devices()
+            for key in went_offline:
+                self._fire_updated(key)
 
     def _restore_device(self, key: str, info: dict) -> None:
+        offline_reason = info.get("offline_reason")
         self._devices[key] = {
             **info,
+            "device_os_version": info.get("device_os_version"),
             "online": False,
+            # A record that was online when HA stopped has no reason, and nor
+            # does one persisted by an older version: as far as HA knows, its device
+            # lost contact.
+            "offline_reason": (
+                offline_reason
+                if offline_reason in OFFLINE_REASONS
+                else OFFLINE_REASON_TIMEOUT
+            ),
             "last_seen": info.get("last_seen"),
             "state": {},
             "ha_device_id": None,
@@ -834,7 +992,9 @@ class BNGntManagedDeviceRegistry:
                 "device_type": device.get("device_type", ""),
                 "device_model_name": device.get("device_model_name"),
                 "device_os": device.get("device_os", ""),
+                "device_os_version": device.get("device_os_version"),
                 "app_version": device.get("app_version"),
+                "offline_reason": device.get("offline_reason"),
                 "last_seen": device.get("last_seen"),
             }
 
@@ -1029,6 +1189,7 @@ async def handle_register_managed_device(
         device_type=call.data["device_type"],
         device_model_name=call.data["device_model_name"],
         device_os=call.data["device_os"],
+        device_os_version=call.data.get("device_os_version"),
         app_version=call.data["app_version"],
         managed_device_id=call.data.get("managed_device_id"),
     )
@@ -1085,29 +1246,12 @@ async def handle_list_managed_devices(
     hass: HomeAssistant, call: ServiceCall
 ) -> dict:
     registry = _get_registry(hass)
-    dev_reg = dr.async_get(hass)
-
-    managed_devices: list[dict] = []
-    for key, device in registry.list_devices():
-        ha_device = dev_reg.async_get_device(identifiers={(DOMAIN, key)})
-        managed_devices.append(
-            {
-                "managed_device_id": key,
-                "profile_id": device["profile_id"],
-                "device_id": device["device_id"],
-                "device_name": device["device_name"],
-                "name_by_user": ha_device.name_by_user if ha_device else None,
-                "device_brand": device.get("device_brand"),
-                "device_type": device.get("device_type"),
-                "device_model_name": device.get("device_model_name"),
-                "device_os": device.get("device_os"),
-                "app_version": device.get("app_version"),
-                "online": device["online"],
-                "last_seen": _epoch_ms(device.get("last_seen")),
-            }
-        )
-
-    return {"managed_devices": managed_devices}
+    return {
+        "managed_devices": [
+            _serialize_managed_device(hass, key, device)
+            for key, device in registry.list_devices()
+        ]
+    }
 
 
 async def handle_replace_managed_device(

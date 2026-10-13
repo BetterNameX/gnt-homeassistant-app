@@ -138,6 +138,10 @@
           "name": "Device OS",
           "description": "Required. The device operating system (e.g. \"ios\", \"android\")."
         },
+        "device_os_version": {
+          "name": "Device OS version",
+          "description": "Optional. The version of the device operating system (e.g. \"18.5\"). Can be null."
+        },
         "app_version": {
           "name": "App version",
           "description": "Required. The Zendo app version running on the device."

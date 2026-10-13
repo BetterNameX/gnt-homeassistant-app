@@ -240,6 +240,14 @@ register_managed_device:
       required: true
       selector:
         text:
+    device_os_version:
+      name: Device OS version
+      description: >-
+        Optional. The version of the device operating system (e.g. "18.5").
+        Can be null.
+      required: false
+      selector:
+        text:
     app_version:
       name: App version
       description: Required. The Zendo app version running on the device.

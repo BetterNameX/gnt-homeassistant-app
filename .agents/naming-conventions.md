@@ -30,7 +30,8 @@ IDs, automations, and HACS tracking all depend on it). This means:
 - Python class names: `BNGntNotifyEntity`, `BNGntStatusBinarySensor`,
   `BNGntConfigFlow`.
 - HA bus event names: `bngnt_doorbell_ring`, `bngnt_doorbell_action`,
-  `bngnt_site_config_manifest_updated`.
+  `bngnt_site_config_manifest_updated`, `bngnt_managed_device_command`,
+  `bngnt_managed_device_updated`, `bngnt_managed_device_removed`.
 - Docstrings and comments: no "Zendo" - omit the word or use the code name.
 
 ### Quick reference

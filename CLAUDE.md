@@ -10,5 +10,6 @@ Read these files for project details:
 - [docs/push-notifications-deep-linking.md](docs/push-notifications-deep-linking.md): push
   notifications and their deep links.
 - [docs/managed-devices.md](docs/managed-devices.md): managed devices (Always-On Display):
-  records and their opaque managed device IDs, replacing and deleting a device, the Delete
-  button, and the migration to config entry minor version 2.
+  records and their opaque managed device IDs, online status and the offline reason, the
+  state the app reports, the `bngnt_managed_device_updated` / `_removed` events, replacing
+  and deleting a device, the Delete button, and the migration to config entry minor version 2.
