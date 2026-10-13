@@ -455,7 +455,10 @@ managed_device_screen_configure:
           multiple: true
     brightness:
       name: Brightness
-      description: Optional. Screen brightness (1-100%).
+      description: >-
+        Optional. Screen brightness (1-100%). With auto-brightness on, this is
+        how bright the screen is in normal room light, and the device adjusts
+        it as the light changes.
       required: false
       selector:
         number:
@@ -576,3 +579,77 @@ managed_device_app_unlock:
         device:
           integration: zendo
           multiple: true
+
+managed_device_auto_brightness_configure:
+  name: Configure device auto-brightness (Kiosk)
+  description: >-
+    Turn auto-brightness on or off on a Zendo device. With it on, the device
+    adjusts the screen to the light around it, and the brightness you set is
+    how bright the screen is in normal room light. Devices without a working
+    light sensor are skipped.
+  fields:
+    device:
+      name: Device
+      description: Required. One or more Zendo devices.
+      required: true
+      selector:
+        device:
+          integration: zendo
+          multiple: true
+    mode:
+      name: Mode
+      description: Required. Turn auto-brightness on or off.
+      required: true
+      selector:
+        select:
+          options:
+            - label: "On"
+              value: "on"
+            - label: "Off"
+              value: "off"
+
+managed_device_wake_on_approach_configure:
+  name: Configure device wake on approach (Kiosk)
+  description: >-
+    Configure wake on approach on a Zendo device: the screen wakes when someone
+    comes up to it. Provide at least one setting - only the values you provide
+    will be changed, the rest remain unchanged. Devices that can't wake on
+    approach are skipped.
+  fields:
+    device:
+      name: Device
+      description: Required. One or more Zendo devices.
+      required: true
+      selector:
+        device:
+          integration: zendo
+          multiple: true
+    mode:
+      name: Mode
+      description: Optional. Turn wake on approach on or off.
+      required: false
+      selector:
+        select:
+          options:
+            - label: "On"
+              value: "on"
+            - label: "Off"
+              value: "off"
+    sensitivity:
+      name: Sensitivity
+      description: >-
+        Optional. How close someone has to come for the screen to wake. Only
+        devices whose sensor tells distance have sensitivity levels. On the
+        others it's left out, and the mode is still set.
+      required: false
+      selector:
+        select:
+          options:
+            - label: "Very close"
+              value: "very_close"
+            - label: "Close"
+              value: "close"
+            - label: "Medium"
+              value: "medium"
+            - label: "Far"
+              value: "far"

@@ -36,11 +36,17 @@ with ``offline_reason`` ``timeout`` and all its entities become
 unavailable. ``unregister_managed_device`` marks it offline with
 ``unregistered``.
 
-Persistence: each record's metadata, ``offline_reason`` and ``last_seen``
-(not its runtime state) are stored in the config entry so entities survive
-HA restarts. ``last_seen`` is also written when HA stops, so it keeps the
-last heartbeat across a restart. On boot, entities are restored as
-unavailable until the device reconnects and re-registers.
+Persistence: each record's metadata, ``offline_reason``, ``last_seen`` and
+the optional entities it has (not its runtime state) are stored in the
+config entry so entities survive HA restarts. ``last_seen`` is also written
+when HA stops, so it keeps the last heartbeat across a restart. On boot,
+entities are restored as unavailable until the device reconnects and
+re-registers.
+
+Optional entities: a property marked ``optional`` is a sensor only some
+devices have, such as a wall panel's presence sensor. A record gets its
+entity once a state update carries a value other than null for it, and keeps
+it from then on.
 
 Status events: ``bngnt_managed_device_updated`` carries a record exactly as
 ``list_managed_devices`` lists it, and ``bngnt_managed_device_removed``
@@ -61,6 +67,7 @@ from typing import Any, Literal, TypedDict
 import voluptuous as vol
 
 from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
     BinarySensorEntity,
 )
 from homeassistant.components.sensor import (
@@ -112,7 +119,18 @@ OfflineReason = Literal["timeout", "unregistered"]
 EVENT_MANAGED_DEVICE_UPDATED = "bngnt_managed_device_updated"
 EVENT_MANAGED_DEVICE_REMOVED = "bngnt_managed_device_removed"
 
-# What a takeover copies from the caller's record into the target's.
+# JSON-RPC 2.0's code for a method the device doesn't know: its app predates
+# the command.
+JSONRPC_METHOD_NOT_FOUND = -32601
+
+# The values of the on/off settings and of wake on approach's sensitivity, in
+# both the state the app reports and the commands it takes.
+ON_OFF = ["on", "off"]
+WAKE_ON_APPROACH_SENSITIVITIES = ["very_close", "close", "medium", "far"]
+
+# What a takeover copies from the caller's record into the target's. Not
+# ``optional_entities``: those are entities of the target's HA device, which
+# the target keeps.
 _ATTACHED_DEVICE_FIELDS = (
     "profile_id",
     "device_id",
@@ -136,6 +154,12 @@ _ATTACHED_DEVICE_FIELDS = (
 # state_key: the key inside the decoded state dict (snake_case, since the
 # HA client in the Zendo app converts camelCase -> snake_case before
 # sending the state JSON string).
+#
+# translation_key: takes the entity's name, state labels and icons from
+# strings.json and icons.json instead of ``name`` and ``icon``.
+#
+# optional: the entity is created only once the device reports a value other
+# than null for it (see the module docstring).
 # ---------------------------------------------------------------------------
 
 SENSOR_PROPERTIES: dict[str, dict] = {
@@ -207,6 +231,36 @@ SENSOR_PROPERTIES: dict[str, dict] = {
         "icon": "mdi:timer-outline",
         "state_key": "screensaver_timer",
     },
+    # null: the device has no working light sensor.
+    "auto_brightness": {
+        "translation_key": "auto_brightness",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "auto_brightness",
+        "options": ON_OFF,
+        "optional": True,
+    },
+    # null: the device has no working presence or proximity sensor.
+    "wake_on_approach": {
+        "translation_key": "wake_on_approach",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "wake_on_approach",
+        "options": ON_OFF,
+        "optional": True,
+    },
+    # null: the device's wake on approach has no sensitivity levels.
+    "wake_on_approach_sensitivity": {
+        "translation_key": "wake_on_approach_sensitivity",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "wake_on_approach_sensitivity",
+        "options": WAKE_ON_APPROACH_SENSITIVITIES,
+        "optional": True,
+    },
 }
 
 BINARY_SENSOR_PROPERTIES: dict[str, dict] = {
@@ -215,6 +269,17 @@ BINARY_SENSOR_PROPERTIES: dict[str, dict] = {
         "device_class": None,
         "icon": None,
         "state_key": "locked",
+    },
+    # null: no sensor, or no reading yet.
+    "presence": {
+        "translation_key": "presence",
+        # Occupancy reads Detected / Clear. The presence device class reads
+        # Home / Away, which is wrong at a commercial property.
+        "device_class": BinarySensorDeviceClass.OCCUPANCY,
+        "state_key": "presence",
+        # The reported value for on and off. Anything else is unknown.
+        "values": {"present": True, "absent": False},
+        "optional": True,
     },
 }
 
@@ -352,6 +417,36 @@ SERVICE_MANAGED_DEVICE_APP_UNLOCK_SCHEMA = vol.Schema(
 )
 
 
+def _on_off_from_bool(value: Any) -> Any:
+    # YAML 1.1 reads an unquoted on / off as a boolean.
+    if value is True:
+        return "on"
+    if value is False:
+        return "off"
+    return value
+
+
+_ON_OFF_VALIDATOR = vol.All(_on_off_from_bool, vol.In(ON_OFF))
+
+SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE_SCHEMA = vol.Schema(
+    {
+        vol.Required("device"): _DEVICE_VALIDATOR,
+        vol.Required("mode"): _ON_OFF_VALIDATOR,
+    },
+)
+
+SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required("device"): _DEVICE_VALIDATOR,
+            vol.Optional("mode"): _ON_OFF_VALIDATOR,
+            vol.Optional("sensitivity"): vol.In(WAKE_ON_APPROACH_SENSITIVITIES),
+        },
+    ),
+    cv.has_at_least_one_key("mode", "sensitivity"),
+)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -361,6 +456,14 @@ class BNGntManagedDeviceError(HomeAssistantError):
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
+        self.code = code
+
+
+class BNGntManagedDeviceCommandError(HomeAssistantError):
+    """A JSON-RPC error object a device answered a command with."""
+
+    def __init__(self, message: str, code: Any) -> None:
+        super().__init__(f"Device returned error: {message}")
         self.code = code
 
 
@@ -400,6 +503,8 @@ class BNGntManagedDeviceRecord(TypedDict):
     # device hasn't been seen since.
     last_seen: float | None
     ha_device_id: str | None
+    # The property keys of the optional entities created for this record.
+    optional_entities: list[str]
 
 
 def _serialize_managed_device(
@@ -432,6 +537,14 @@ def _serialize_managed_device(
 
 def _without_wifi_signal(state: dict) -> dict:
     return {k: v for k, v in state.items() if k != "wifi_signal"}
+
+
+def _restored_optional_entities(value: Any) -> list[str]:
+    # A key this version doesn't know is kept, so a newer version that wrote
+    # it gets its entity back after a downgrade and upgrade.
+    if not isinstance(value, list):
+        return []
+    return [prop_key for prop_key in value if isinstance(prop_key, str)]
 
 
 class BNGntManagedDeviceRegistry:
@@ -546,7 +659,12 @@ class BNGntManagedDeviceRegistry:
         }
 
         if is_new:
-            self._devices[key] = {**attached, "state": {}, "ha_device_id": None}
+            self._devices[key] = {
+                **attached,
+                "state": {},
+                "ha_device_id": None,
+                "optional_entities": [],
+            }
         else:
             self._devices[key].update(attached)
 
@@ -628,6 +746,9 @@ class BNGntManagedDeviceRegistry:
 
         if was_offline:
             self._set_entities_available(key, True)
+
+        created = self._create_reported_optional_entities(key)
+        if was_offline or created:
             self._persist_devices()
 
         self._update_entity_values(key)
@@ -680,6 +801,7 @@ class BNGntManagedDeviceRegistry:
 
         self._set_entities_available(managed_device_id, target["online"])
         self._update_entity_values(managed_device_id)
+        self._create_reported_optional_entities(managed_device_id)
         self._persist_devices()
         self._fire_removed(caller_key)
         self._fire_updated(managed_device_id)
@@ -721,7 +843,8 @@ class BNGntManagedDeviceRegistry:
            unblocking this coroutine.
 
         Raises ``HomeAssistantError`` on timeout or if the device returns
-        a JSON-RPC error object.
+        a JSON-RPC error object. Method not found means the app on the device
+        predates the command, and gets a message that says so.
         """
         device = self._devices.get(key)
         if not device:
@@ -758,6 +881,13 @@ class BNGntManagedDeviceRegistry:
                 f"Device '{device['device_name']}' did not respond "
                 f"within {COMMAND_TIMEOUT} seconds"
             ) from None
+        except BNGntManagedDeviceCommandError as err:
+            if err.code == JSONRPC_METHOD_NOT_FOUND:
+                raise HomeAssistantError(
+                    f"Device '{device['device_name']}' needs a newer version "
+                    "of the Zendo app"
+                ) from err
+            raise
         finally:
             self._pending_commands.pop(rpc_id, None)
 
@@ -788,9 +918,8 @@ class BNGntManagedDeviceRegistry:
                 if isinstance(error, dict)
                 else str(error)
             )
-            future.set_exception(
-                HomeAssistantError(f"Device returned error: {msg}")
-            )
+            code = error.get("code") if isinstance(error, dict) else None
+            future.set_exception(BNGntManagedDeviceCommandError(msg, code))
         else:
             future.set_result(response.get("result", {}))
 
@@ -922,11 +1051,67 @@ class BNGntManagedDeviceRegistry:
             "last_seen": info.get("last_seen"),
             "state": {},
             "ha_device_id": None,
+            "optional_entities": _restored_optional_entities(
+                info.get("optional_entities")
+            ),
         }
         self._sync_ha_device(key)
         self._create_entities(key, available=False)
 
     def _create_entities(self, key: str, available: bool) -> None:
+        """Create a record's entities, with the optional ones it already has."""
+        created = self._devices[key]["optional_entities"]
+
+        def wanted(properties: dict[str, dict]) -> list[str]:
+            return [
+                prop_key
+                for prop_key, prop in properties.items()
+                if not prop.get("optional") or prop_key in created
+            ]
+
+        self._add_entities(
+            key,
+            wanted(SENSOR_PROPERTIES),
+            wanted(BINARY_SENSOR_PROPERTIES),
+            available,
+        )
+
+    def _create_reported_optional_entities(self, key: str) -> bool:
+        """Create the optional entities the record's state now has a value for.
+
+        Returns True if it created any. The record lists them straight away,
+        so a second state update before HA has added them doesn't add them
+        again.
+        """
+        device = self._devices[key]
+        state = device["state"]
+        created = device["optional_entities"]
+
+        def reported(properties: dict[str, dict]) -> list[str]:
+            return [
+                prop_key
+                for prop_key, prop in properties.items()
+                if prop.get("optional")
+                and prop_key not in created
+                and state.get(prop["state_key"]) is not None
+            ]
+
+        sensor_keys = reported(SENSOR_PROPERTIES)
+        binary_sensor_keys = reported(BINARY_SENSOR_PROPERTIES)
+        if not sensor_keys and not binary_sensor_keys:
+            return False
+
+        created.extend(sensor_keys + binary_sensor_keys)
+        self._add_entities(key, sensor_keys, binary_sensor_keys, device["online"])
+        return True
+
+    def _add_entities(
+        self,
+        key: str,
+        sensor_keys: list[str],
+        binary_sensor_keys: list[str],
+        available: bool,
+    ) -> None:
         device = self._devices[key]
 
         add_sensors = self._hass.data[DOMAIN].get(
@@ -936,24 +1121,26 @@ class BNGntManagedDeviceRegistry:
             "async_add_managed_device_binary_sensors"
         )
 
-        if add_sensors:
+        if add_sensors and sensor_keys:
             add_sensors(
                 [
                     BNGntManagedDeviceSensor(
-                        key, device, prop_key, prop, self, available
+                        key, device, prop_key, SENSOR_PROPERTIES[prop_key], self,
+                        available,
                     )
-                    for prop_key, prop in SENSOR_PROPERTIES.items()
+                    for prop_key in sensor_keys
                 ],
                 update_before_add=True,
             )
 
-        if add_binary_sensors:
+        if add_binary_sensors and binary_sensor_keys:
             add_binary_sensors(
                 [
                     BNGntManagedDeviceBinarySensor(
-                        key, device, prop_key, prop, self, available
+                        key, device, prop_key, BINARY_SENSOR_PROPERTIES[prop_key],
+                        self, available,
                     )
-                    for prop_key, prop in BINARY_SENSOR_PROPERTIES.items()
+                    for prop_key in binary_sensor_keys
                 ],
                 update_before_add=True,
             )
@@ -996,6 +1183,7 @@ class BNGntManagedDeviceRegistry:
                 "app_version": device.get("app_version"),
                 "offline_reason": device.get("offline_reason"),
                 "last_seen": device.get("last_seen"),
+                "optional_entities": list(device.get("optional_entities", [])),
             }
 
         self._hass.config_entries.async_update_entry(
@@ -1040,9 +1228,13 @@ class BNGntManagedDeviceSensor(SensorEntity):
         self._registry = registry
         self._state_key = prop_def["state_key"]
         self._device_available = available
+        self._options: list[str] | None = prop_def.get("options")
 
         self._attr_unique_id = f"md_{key}_{prop_key}"
-        self._attr_name = prop_def["name"]
+        if prop_def.get("translation_key"):
+            self._attr_translation_key = prop_def["translation_key"]
+        else:
+            self._attr_name = prop_def["name"]
         if prop_def.get("device_class"):
             self._attr_device_class = prop_def["device_class"]
         if prop_def.get("state_class"):
@@ -1051,8 +1243,8 @@ class BNGntManagedDeviceSensor(SensorEntity):
             self._attr_native_unit_of_measurement = prop_def["native_unit"]
         if prop_def.get("icon"):
             self._attr_icon = prop_def["icon"]
-        if prop_def.get("options"):
-            self._attr_options = prop_def["options"]
+        if self._options:
+            self._attr_options = self._options
 
         self._device_info_snapshot = _device_info_from_dict(key, device_info)
 
@@ -1065,7 +1257,12 @@ class BNGntManagedDeviceSensor(SensorEntity):
         device = self._registry.get_device(self._key)
         if not device:
             return None
-        return device.get("state", {}).get(self._state_key)
+        value = device.get("state", {}).get(self._state_key)
+        # The state is loose on the wire, and an enum sensor raises on a
+        # value outside its options, which would fail the state update.
+        if self._options and value not in self._options:
+            return None
+        return value
 
     @property
     def available(self) -> bool:
@@ -1112,9 +1309,13 @@ class BNGntManagedDeviceBinarySensor(BinarySensorEntity):
         self._registry = registry
         self._state_key = prop_def["state_key"]
         self._device_available = available
+        self._values: dict[str, bool] | None = prop_def.get("values")
 
         self._attr_unique_id = f"md_{key}_{prop_key}"
-        self._attr_name = prop_def["name"]
+        if prop_def.get("translation_key"):
+            self._attr_translation_key = prop_def["translation_key"]
+        else:
+            self._attr_name = prop_def["name"]
         if prop_def.get("device_class"):
             self._attr_device_class = prop_def["device_class"]
         if prop_def.get("icon"):
@@ -1131,7 +1332,10 @@ class BNGntManagedDeviceBinarySensor(BinarySensorEntity):
         device = self._registry.get_device(self._key)
         if not device:
             return None
-        return device.get("state", {}).get(self._state_key)
+        value = device.get("state", {}).get(self._state_key)
+        if self._values is None:
+            return value
+        return self._values.get(value) if isinstance(value, str) else None
 
     @property
     def available(self) -> bool:
@@ -1296,9 +1500,14 @@ async def handle_delete_managed_device(
 # Field name mapping: HA uses snake_case (``color_scheme``), the JSON-RPC
 # protocol uses camelCase (``colorScheme``). Conversion happens here.
 #
-# Settings-style RPC methods (screensaver.set, screen.set, audio.set)
-# accept partial params -- only the fields present in the service call
-# are included. The device leaves omitted settings unchanged.
+# Settings-style RPC methods (screensaver.set, screen.set, audio.set,
+# wakeOnApproach.set) accept partial params -- only the fields present in the
+# service call are included. The device leaves omitted settings unchanged.
+#
+# A wall panel setting goes only to the targets that have the sensor for it:
+# a device whose last state reports null for the setting is skipped. One
+# whose state lacks the key is still sent the command, so an older app
+# answers Method not found and the error says to update it.
 # ---------------------------------------------------------------------------
 
 def _resolve_devices_for_command(
@@ -1341,6 +1550,34 @@ async def _fan_out_command(
     ))
 
 
+def _reports_null(
+    registry: BNGntManagedDeviceRegistry, key: str, state_key: str
+) -> bool:
+    device = registry.get_device(key)
+    state = device["state"] if device else {}
+    return state_key in state and state[state_key] is None
+
+
+def _keys_supporting(
+    registry: BNGntManagedDeviceRegistry,
+    keys: list[str],
+    state_key: str,
+) -> list[str]:
+    """Drop the keys whose last state reports null for ``state_key``."""
+    supported: list[str] = []
+    for key in keys:
+        if _reports_null(registry, key, state_key):
+            _LOGGER.info(
+                "Skipping managed device %s, which reports %s as null: "
+                "it doesn't support it",
+                key,
+                state_key,
+            )
+        else:
+            supported.append(key)
+    return supported
+
+
 async def handle_managed_device_screensaver_configure(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
@@ -1367,6 +1604,61 @@ async def handle_managed_device_screen_configure(
         params["colorScheme"] = call.data["color_scheme"]
 
     await _fan_out_command(registry, keys, "screen.set", params)
+
+
+async def handle_managed_device_auto_brightness_configure(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    registry, keys = _resolve_devices_for_command(hass, call)
+
+    keys = _keys_supporting(registry, keys, "auto_brightness")
+    if not keys:
+        raise ServiceValidationError(
+            "The selected devices don't support auto-brightness."
+        )
+
+    await _fan_out_command(
+        registry, keys, "autoBrightness.set", {"mode": call.data["mode"]}
+    )
+
+
+async def handle_managed_device_wake_on_approach_configure(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    registry, keys = _resolve_devices_for_command(hass, call)
+
+    params_by_key: dict[str, dict] = {}
+    for key in _keys_supporting(registry, keys, "wake_on_approach"):
+        params: dict = {}
+        if "mode" in call.data:
+            params["mode"] = call.data["mode"]
+        # Dropped for a device without levels, rather than skipping the
+        # device, so a call that also sets the mode still sets it there.
+        if "sensitivity" in call.data:
+            if _reports_null(registry, key, "wake_on_approach_sensitivity"):
+                _LOGGER.info(
+                    "Not setting the sensitivity of managed device %s, "
+                    "which has no sensitivity levels",
+                    key,
+                )
+            else:
+                params["sensitivity"] = call.data["sensitivity"]
+        if params:
+            params_by_key[key] = params
+
+    if not params_by_key:
+        if "mode" in call.data:
+            raise ServiceValidationError(
+                "The selected devices don't support wake on approach."
+            )
+        raise ServiceValidationError(
+            "The selected devices don't have wake on approach sensitivity levels."
+        )
+
+    await asyncio.gather(*(
+        registry.send_command(key, "wakeOnApproach.set", params)
+        for key, params in params_by_key.items()
+    ))
 
 
 async def handle_managed_device_screen_wake_up(

@@ -21,6 +21,36 @@
           }
         }
       }
+    },
+    "sensor": {
+      "auto_brightness": {
+        "name": "Auto-brightness",
+        "state": {
+          "on": "On",
+          "off": "Off"
+        }
+      },
+      "wake_on_approach": {
+        "name": "Wake on approach",
+        "state": {
+          "on": "On",
+          "off": "Off"
+        }
+      },
+      "wake_on_approach_sensitivity": {
+        "name": "Wake on approach sensitivity",
+        "state": {
+          "very_close": "Very close",
+          "close": "Close",
+          "medium": "Medium",
+          "far": "Far"
+        }
+      }
+    },
+    "binary_sensor": {
+      "presence": {
+        "name": "Presence"
+      }
     }
   },
   "services": {
@@ -262,7 +292,7 @@
         },
         "brightness": {
           "name": "Brightness",
-          "description": "Optional. Screen brightness (1-100%)."
+          "description": "Optional. Screen brightness (1-100%). With auto-brightness on, this is how bright the screen is in normal room light, and the device adjusts it as the light changes."
         },
         "color_scheme": {
           "name": "Color scheme",
@@ -329,6 +359,38 @@
         "device": {
           "name": "Device",
           "description": "Required. One or more Zendo devices."
+        }
+      }
+    },
+    "managed_device_auto_brightness_configure": {
+      "name": "Configure device auto-brightness (Kiosk)",
+      "description": "Turn auto-brightness on or off on a Zendo device. With it on, the device adjusts the screen to the light around it, and the brightness you set is how bright the screen is in normal room light. Devices without a working light sensor are skipped.",
+      "fields": {
+        "device": {
+          "name": "Device",
+          "description": "Required. One or more Zendo devices."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Required. Turn auto-brightness on or off."
+        }
+      }
+    },
+    "managed_device_wake_on_approach_configure": {
+      "name": "Configure device wake on approach (Kiosk)",
+      "description": "Configure wake on approach on a Zendo device: the screen wakes when someone comes up to it. Provide at least one setting - only the values you provide will be changed, the rest remain unchanged. Devices that can't wake on approach are skipped.",
+      "fields": {
+        "device": {
+          "name": "Device",
+          "description": "Required. One or more Zendo devices."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Optional. Turn wake on approach on or off."
+        },
+        "sensitivity": {
+          "name": "Sensitivity",
+          "description": "Optional. How close someone has to come for the screen to wake. Only devices whose sensor tells distance have sensitivity levels. On the others it's left out, and the mode is still set."
         }
       }
     }

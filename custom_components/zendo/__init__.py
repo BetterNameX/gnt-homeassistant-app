@@ -44,10 +44,12 @@ from .managed_devices import (
     SERVICE_MANAGED_DEVICE_APP_RELOAD_SCHEMA,
     SERVICE_MANAGED_DEVICE_APP_UNLOCK_SCHEMA,
     SERVICE_MANAGED_DEVICE_AUDIO_CONFIGURE_SCHEMA,
+    SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE_SCHEMA,
     SERVICE_MANAGED_DEVICE_COMMAND_RESPONSE_SCHEMA,
     SERVICE_MANAGED_DEVICE_SCREEN_CONFIGURE_SCHEMA,
     SERVICE_MANAGED_DEVICE_SCREEN_WAKE_UP_SCHEMA,
     SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE_SCHEMA,
+    SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE_SCHEMA,
     SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA,
     SERVICE_REPLACE_MANAGED_DEVICE_SCHEMA,
     SERVICE_UNREGISTER_MANAGED_DEVICE_SCHEMA,
@@ -58,10 +60,12 @@ from .managed_devices import (
     handle_managed_device_app_reload,
     handle_managed_device_app_unlock,
     handle_managed_device_audio_configure,
+    handle_managed_device_auto_brightness_configure,
     handle_managed_device_command_response,
     handle_managed_device_screen_configure,
     handle_managed_device_screen_wake_up,
     handle_managed_device_screensaver_configure,
+    handle_managed_device_wake_on_approach_configure,
     handle_register_managed_device,
     handle_replace_managed_device,
     handle_unregister_managed_device,
@@ -111,6 +115,12 @@ SERVICE_MANAGED_DEVICE_AUDIO_CONFIGURE = "managed_device_audio_configure"
 SERVICE_MANAGED_DEVICE_APP_RELOAD = "managed_device_app_reload"
 SERVICE_MANAGED_DEVICE_APP_LOCK = "managed_device_app_lock"
 SERVICE_MANAGED_DEVICE_APP_UNLOCK = "managed_device_app_unlock"
+SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE = (
+    "managed_device_auto_brightness_configure"
+)
+SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE = (
+    "managed_device_wake_on_approach_configure"
+)
 
 STATIC_SERVICES = [
     SERVICE_SETUP_PUSH_NOTIFICATIONS,
@@ -135,6 +145,8 @@ STATIC_SERVICES = [
     SERVICE_MANAGED_DEVICE_APP_RELOAD,
     SERVICE_MANAGED_DEVICE_APP_LOCK,
     SERVICE_MANAGED_DEVICE_APP_UNLOCK,
+    SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE,
+    SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE,
 ]
 
 # The doorbell ring sound plays a configurable number of times (1-5, default 1).
@@ -715,6 +727,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         SERVICE_MANAGED_DEVICE_APP_UNLOCK: (
             partial(handle_managed_device_app_unlock, hass),
             SERVICE_MANAGED_DEVICE_APP_UNLOCK_SCHEMA,
+        ),
+        SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE: (
+            partial(handle_managed_device_auto_brightness_configure, hass),
+            SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE_SCHEMA,
+        ),
+        SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE: (
+            partial(handle_managed_device_wake_on_approach_configure, hass),
+            SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE_SCHEMA,
         ),
     }
 

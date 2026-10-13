@@ -46,3 +46,11 @@ IDs, automations, and HACS tracking all depend on it). This means:
 | Python class name              | BNGnt        | `class BNGntConfigFlow`                      |
 | Bus event name                 | bngnt_       | `"bngnt_doorbell_ring"`                      |
 | Docstring / code comment       | (omit)       | `"""Config flow for the integration."""`     |
+
+## No hardware names
+
+Never name a device's maker or model (a wall panel's brand, model or product name) anywhere in this
+repo: action and field descriptions, entity names, error messages, docs or comments. Describe the
+device by what it has instead, such as "a sensor that tells distance" or "a presence sensor". The
+app knows which hardware it runs on; the integration doesn't need to, and its text shouldn't date or
+favour one maker.
