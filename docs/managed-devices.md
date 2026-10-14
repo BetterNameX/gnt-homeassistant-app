@@ -4,7 +4,7 @@
 
 A managed device is a phone, tablet or wall panel running the Zendo app with Always-On Display (Kiosk) on. It registers with Home Assistant so automations can control it: wake the screen, set the brightness or volume, lock it, and so on. Each managed device is a Home Assistant device with its own sensor entities (battery, screen, volume, locked and so on). A wall panel can also have auto-brightness, wake on approach and presence entities (see [Wall Panel Settings and Presence](#wall-panel-settings-and-presence)).
 
-The code lives in `custom_components/zendo/managed_devices.py`. The services are registered in `__init__.py`.
+The code lives in `custom_components/zendo/managed_devices.py`, and the admin code in `admin_code.py` (see [Admin Code](#admin-code)). The services are registered in `__init__.py`.
 
 ---
 
@@ -18,7 +18,7 @@ The integration owns each managed device. It keeps one **record** per managed de
 
 **Managed device IDs are opaque.** Never build one from a profile ID and device ID, and never parse one. Records made before 1.9.0 have the ID `<profile_id>_<device_id>`, and new ones may have that form too, but a record's ID says nothing about the device attached to it now.
 
-Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. The persisted fields are the attached ids, the device info (including `device_os_version`), the app version, `offline_reason`, `last_seen` and, from 1.10.0, `optional_entities` (see [Created When Reported](#created-when-reported)). The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets.
+Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. A record's admin code isn't: it has its own store (see [Admin Code](#admin-code)). The persisted fields are the attached ids, the device info (including `device_os_version`), the app version, `offline_reason`, `last_seen` and, from 1.9.3, `optional_entities` (see [Created When Reported](#created-when-reported)). The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets.
 
 `last_seen` is a Unix timestamp in seconds: when the device was last in touch with Home Assistant.
 
@@ -106,10 +106,10 @@ All of these are internal services, called by the Zendo app. Field names and res
 | `ip_address` | string or `null`: the device's IP address | No entity |
 | `wifi_ssid` | string or `null`: the Wi-Fi network's name | No entity |
 | `wifi_signal` | integer or `null`: the Wi-Fi signal strength in dBm | No entity |
-| `auto_brightness` | `on`, `off` or `null` | Auto-brightness, from 1.10.0 |
-| `wake_on_approach` | `on`, `off` or `null` | Wake on approach, from 1.10.0 |
-| `wake_on_approach_sensitivity` | `very_close`, `close`, `medium`, `far` or `null` | Wake on approach sensitivity, from 1.10.0 |
-| `presence` | `present`, `absent` or `null` | Presence, from 1.10.0 |
+| `auto_brightness` | `on`, `off` or `null` | Auto-brightness, from 1.9.3 |
+| `wake_on_approach` | `on`, `off` or `null` | Wake on approach, from 1.9.3 |
+| `wake_on_approach_sensitivity` | `very_close`, `close`, `medium`, `far` or `null` | Wake on approach sensitivity, from 1.9.3 |
+| `presence` | `present`, `absent` or `null` | Presence, from 1.9.3 |
 
 `ip_address`, `wifi_ssid` and `wifi_signal` are only for device status in the app, so they have no entities. The app sends `null` for any of them it can't read. A change in `wifi_signal` alone fires no event (see [Events](#events)).
 
@@ -223,11 +223,13 @@ These services are for automations to control a device. Each takes `device`, one
 | `managed_device_app_reload` | none | `app.reload` |
 | `managed_device_app_lock` | `pin`, optional `message` | `app.lock` `{pin, message?}` |
 | `managed_device_app_unlock` | none | `app.unlock` |
-| `managed_device_auto_brightness_configure` (from 1.10.0) | `mode`: `on` or `off` | `autoBrightness.set` `{mode}` |
-| `managed_device_wake_on_approach_configure` (from 1.10.0) | optional `mode`: `on` or `off`, optional `sensitivity`: `very_close`, `close`, `medium` or `far`; at least one of them | `wakeOnApproach.set` `{mode?, sensitivity?}` |
+| `managed_device_auto_brightness_configure` (from 1.9.3) | `mode`: `on` or `off` | `autoBrightness.set` `{mode}` |
+| `managed_device_wake_on_approach_configure` (from 1.9.3) | optional `mode`: `on` or `off`, optional `sensitivity`: `very_close`, `close`, `medium` or `far`; at least one of them | `wakeOnApproach.set` `{mode?, sensitivity?}` |
+| `managed_device_admin_code_configure` (from 1.9.3, admin only) | `code`, or `remove: true` | `adminCode.set` `{code}`, with `code: null` to remove it |
 
 - A settings method gets only the fields the call has, and the device leaves the rest unchanged.
-- The two 1.10.0 services skip the devices that don't support the setting. See [Changing the Settings](#changing-the-settings).
+- The auto-brightness and wake on approach services skip the devices that don't support the setting. See [Changing the Settings](#changing-the-settings).
+- `managed_device_admin_code_configure` handles its errors its own way: the devices that take the change keep it, and the error names the others. See [Admin Code](#admin-code).
 - YAML reads an unquoted `on` or `off` as a boolean, so `mode` takes `true` and `false` as `on` and `off`.
 
 ### Errors
@@ -240,14 +242,14 @@ The call fails when a device is offline, when it doesn't answer within 10 second
 | `-32001` | Not supported: the device has no light sensor or no wake sensor, or it got a sensitivity and has no levels. | `Device returned error: <message>` |
 | `-32602` | Invalid params. | `Device returned error: <message>` |
 
-- From 1.10.0, Method not found reads as needing a newer app for every command, not only the new ones.
+- From 1.9.3, Method not found reads as needing a newer app for every command, not only the new ones.
 - `-32001` is rare: the services don't send a setting to a device whose last state says it doesn't support it.
 
 ---
 
 ## Wall Panel Settings and Presence
 
-From 1.10.0, a wall panel running Zendo reports its auto-brightness and wake on approach settings and its presence sensor, and automations can change the settings. The app owns the settings: Home Assistant reads them from the state and changes them with a command, as it does the screensaver.
+From 1.9.3, a wall panel running Zendo reports its auto-brightness and wake on approach settings and its presence sensor, and automations can change the settings. The app owns the settings: Home Assistant reads them from the state and changes them with a command, as it does the screensaver.
 
 ### State Keys
 
@@ -270,7 +272,7 @@ From 1.10.0, a wall panel running Zendo reports its auto-brightness and wake on 
 | Presence | Binary sensor, occupancy | Detected (`present`), Clear (`absent`) |
 
 - **Presence uses the occupancy device class**, which reads Detected and Clear. The presence device class reads Home and Away, which is wrong at a commercial property.
-- **A value the integration doesn't know reads as unknown**, and so does `null`. The values are loose on the wire, and an enum sensor given a value outside its options would fail the state update. From 1.10.0 every enum sensor works this way, including battery state, screen, color scheme and screensaver mode.
+- **A value the integration doesn't know reads as unknown**, and so does `null`. The values are loose on the wire, and an enum sensor given a value outside its options would fail the state update. From 1.9.3 every enum sensor works this way, including battery state, screen, color scheme and screensaver mode.
 - Their names, state labels and icons come from `strings.json` and `icons.json` through translation keys. The other managed device entities set their names and icons in code.
 
 ### Created When Reported
@@ -302,6 +304,136 @@ Use it to react to someone at the panel, not to tell whether anyone is in the ar
 - If that leaves no device, the call fails with a validation error saying the selected devices don't support it.
 - A device whose state doesn't have the key is still sent the command: an older app, or a device that hasn't sent its state since Home Assistant started. An older app answers Method not found, and an offline device fails as offline.
 
+## Admin Code
+
+From 1.9.3. A kiosk device's admin code is 4, 6 or 8 digits, set on the device or from Home Assistant. The device tells Home Assistant its code, or that it has none, whenever it changes and every time it connects, and Home Assistant keeps the last report, so the code can be looked up even while the device is offline.
+
+A code never goes in a record's `state`, `_serialize_managed_device` (so never in `list_managed_devices` or `bngnt_managed_device_updated`), an entity, an attribute, an event the integration fires, a log line or an error message.
+
+### Storage
+
+The codes are in their own store, `.storage/zendo.managed_device_admin_codes` (`Store` version 1), not in the config entry's data, which anything that reads the entry would see. The file is written with `private=True`, so only its owner can read it, and with atomic writes.
+
+It is keyed by managed device ID:
+
+```json
+{
+  "md_3f2a9c0e8b7d4c1e9a6f5b4d3c2e1f00": { "code": "246810", "reported_at": "2026-10-14T09:30:00.123456+00:00" },
+  "profileId123_deviceId456": { "code": null, "reported_at": "2026-10-14T09:31:12.000000+00:00" }
+}
+```
+
+- `code` is the code, or `null` when the device reported that it has none.
+- `reported_at` is when the device last reported, ISO 8601 in UTC.
+- A record with no entry hasn't had a report: its code is unknown.
+
+`async_setup_entry` loads the store before the registry starts, and drops the entries of managed device IDs that aren't in the config entry's records. A change is written straight after, with `async_delay_save`, and a pending write is flushed when the integration unloads, so that it can't land after the file is removed. Home Assistant's final write at stop saves one too.
+
+| When | The record's entry |
+|---|---|
+| The device reports a code, or none | Set, with `reported_at` now. A report of the same code still moves `reported_at`. |
+| `unregister_managed_device` | Kept. |
+| `delete_managed_device`, or the Delete button | Removed. |
+| `replace_managed_device` | The caller's entry moves to the target, replacing the target's. If the caller has none, the target's is removed: it was the old device's code, and would otherwise be handed out for the new one. The target then reads unknown until the new device reports, which the app does right after a takeover. A retry, with the device already attached, changes nothing. The Homey app does the same. |
+| Home Assistant starts | Dropped if the record is gone. |
+| The integration is removed | The file is removed, in `async_remove_entry`. |
+
+### Reporting: `zendo/report_managed_device_admin_code`
+
+The app reports with a WebSocket command, not a service:
+
+```json
+{"id": 42, "type": "zendo/report_managed_device_admin_code", "profile_id": "profileId123", "device_id": "deviceId456", "admin_code": "246810"}
+```
+
+The result is `{"success": true, "registered": true}`.
+
+- `admin_code` is the code, or `null` for none.
+- The record is found by its attached `profile_id` + `device_id`, as for `update_managed_device_state` (see [Finding a Record](#finding-a-record)). With none, the result is `registered: false`, nothing is kept, and the app registers again.
+- The app reports when the code changes, after each registration and after a takeover, and before it answers `adminCode.set`.
+- It isn't admin-only, like the device-facing services.
+- Extra fields are dropped, so a newer app can add one.
+
+**Why a command.** Every service call fires a `call_service` event with its data, and the recorder keeps it. A service would record the code every time a device connects. A WebSocket command fires no event, so nothing is recorded. Home Assistant logs the WebSocket messages it receives, this one included, only with debug logging on for `homeassistant.components.websocket_api`.
+
+Errors:
+
+| Error code | Message | When |
+|---|---|---|
+| `invalid_format` | `admin_code must be exactly 4, 6 or 8 digits, or null` | `admin_code` isn't 4, 6 or 8 ASCII digits or `null`. |
+| `invalid_format` | Home Assistant's schema message | `profile_id` or `device_id` is missing or empty, or `admin_code` is missing. |
+| `home_assistant_error` | `Managed devices are not initialized` | The integration isn't loaded. A WebSocket command can't be unregistered, so it stays after an unload. |
+
+The schema takes any value for `admin_code`, and the handler checks it with a fixed message. A schema error ends with the value it rejected ("Got ...") and Home Assistant's WebSocket layer logs it.
+
+### Actions
+
+Both are admin-only, registered with `async_register_admin_service`. A call from a user who isn't an administrator is refused with `Unauthorized`. A call with no user, such as one from an automation, is allowed.
+
+#### `managed_device_admin_code_get`
+
+Takes `device`, one Home Assistant device, and only responds:
+
+```yaml
+status: set
+admin_code: "246810"
+reported_at: "2026-10-14T09:30:00.123456+00:00"
+```
+
+| `status` | `admin_code` | `reported_at` | Meaning |
+|---|---|---|---|
+| `set` | The code | When the device last reported | The device has this admin code. |
+| `not_set` | `null` | When the device last reported | The device reported that it has no admin code. |
+| `unknown` | `null` | `null` | The device hasn't reported: its app predates admin codes, it hasn't connected since the integration was updated, or the integration was reinstalled. |
+
+It reads only the store and sends nothing to the device, so it works while the device is offline. A device that isn't a managed device is a validation error.
+
+#### `managed_device_admin_code_configure`
+
+Takes `device`, one or more Home Assistant devices, and either `code` (a password text field) or `remove: true`. It sends each device's attached Zendo device `adminCode.set` with `{code}`, or `{code: null}` to remove it, through `send_command`, in parallel, each waiting up to 10 seconds.
+
+These are validation errors, raised before anything is sent, each with a fixed message:
+
+- both `code` and `remove: true`, or neither (`remove: false` and an empty `code` count as not given);
+- a `code` that isn't text: YAML reads an unquoted `012345` as an octal number, so a number is never taken as a code, and the message says to put it in quotes;
+- a `code` that isn't 4, 6 or 8 ASCII digits;
+- an unknown field, or no device.
+
+The schema takes any value for each field and the handler checks them. If a schema rejected the call, Home Assistant would log the call's data, code included, at debug level, and the error could end with the value it rejected.
+
+**Partial success.** A device that answers success keeps the change, whatever the others do. Then the action fails with an error that names each device that didn't take it, and why:
+
+| Why | Reason in the error |
+|---|---|
+| The device is offline, checked before sending | `it's offline` |
+| No answer within 10 seconds | `it didn't answer within 10 seconds. Look up its admin code to see whether it changed` |
+| `-32001` Not supported: in more than one property, or the device can't make the change until something is resolved on it | Setting: `it declined, for example because it's in more than one property: an admin code works only on a device that's in one property`. Removing: `it declined. Check Admin Code in the device's Settings` |
+| `-32601` Method not found: the app predates the admin code | `it needs a newer version of the Zendo app` |
+| `-32602` Invalid params | `it didn't accept the code` |
+| Any other error code | `it answered with error <code>` |
+
+For example: `Couldn't set the admin code on 2 of 3 devices. 'Front desk': it's offline. 'Meeting room': it needs a newer version of the Zendo app. The other device took it.` With one device: `Couldn't set the admin code on 'Front desk': it's offline.` A device is named by the name given to it in Home Assistant, or else its own name. The device's own error message is never used.
+
+A device that answers success has already reported the new code (the app reports before it answers), so a get straight after reads it. The integration doesn't write the store itself.
+
+The devices are chosen as for the other automation services. Home Assistant has no device group or all-devices target for them: select the devices.
+
+### Recorder Exposure
+
+- **Setting a code from Home Assistant records it.** It's in the `call_service` event's `service_data` and in the `bngnt_managed_device_command` event's `request`, and the recorder keeps both until it purges them. The command event also reaches every Zendo app subscribed to it, every managed device connected to this Home Assistant included, and each ignores a command for another device. The code is also in the action's data in automation and script traces, and in the log with debug logging on for `homeassistant.core`. The App Lock's PIN is exposed the same way.
+- **Getting a code records only the device.** The `call_service` event has only `device`, and the response isn't in any event. An automation or script that keeps the response in a `response_variable` keeps the code in its trace, and anything it sends it to, such as a notification, has it too.
+- **A device's report records nothing**, because it's a WebSocket command. With debug logging on for `homeassistant.components.websocket_api`, Home Assistant logs it, as it logs every message it receives.
+- **Setting the code on the device** keeps it out of the recorder: only the report reaches Home Assistant.
+
+The action descriptions say a code set from Home Assistant is kept in recorded events and traces.
+
+### Admin Code Compatibility
+
+- **An older Zendo app with a 1.9.3 integration.** It never reports, so its status is `unknown`. `managed_device_admin_code_configure` sends it the command, it answers Method not found, and the error says it needs a newer version of the Zendo app.
+- **A newer Zendo app with an older integration.** The command answers `unknown_command`. The app avoids it: it checks the integration's version is 1.9.3 or later before it reports, and until then it doesn't let anyone set an admin code, since Home Assistant couldn't keep a copy.
+- **Downgrading below 1.9.3.** The earlier version doesn't know the store and leaves the file alone. After upgrading again, the entries of records that still exist come back, and each device reports again when it next connects.
+- **Removing the integration** removes the file. After reinstalling, every device's code is `unknown` until it reports, which it does when it next connects.
+
 ---
 
 ## Replacing a Device
@@ -316,6 +448,7 @@ Use it to react to someone at the panel, not to tell whether anyone is in the ar
    - The target's Home Assistant device gets the caller's name, model and app version. Its device ID, entity IDs, area and `name_by_user` stay.
    - The caller's own record is removed. Its config entry is removed from its Home Assistant device, and Home Assistant then removes that device and its entities.
    - The target's entities take the caller's availability and state. The target keeps its optional entities, and gets any the caller's state has a value for (see [Created When Reported](#created-when-reported)).
+   - The target takes the caller's admin code entry. If the caller has none, the target's own is removed, since it was the old device's code, and the target reads unknown until the new device reports (see [Admin Code](#admin-code)).
    - `bngnt_managed_device_removed` fires for the caller's record, then `bngnt_managed_device_updated` for the target.
    - The response carries the target's managed device ID and `previous_device_name`, the target's device name from before, so the app can offer to rename itself to it.
 
@@ -325,7 +458,7 @@ An online target can be taken over: the app asks for a second confirmation, and 
 
 ## Deleting a Device
 
-Only offline managed devices can be deleted. Both ways go through `BNGntManagedDeviceRegistry.delete_device`, which fires `bngnt_managed_device_removed`.
+Only offline managed devices can be deleted. Both ways go through `BNGntManagedDeviceRegistry.delete_device`, which removes the record's admin code entry (see [Admin Code](#admin-code)) and fires `bngnt_managed_device_removed`.
 
 - **`delete_managed_device`** forgets the record and removes the config entry from its Home Assistant device, so Home Assistant removes the device and its entities. An unknown managed device ID returns `deleted: false`.
 - **The Delete button** on a managed device's page in Home Assistant calls `async_remove_config_entry_device` in `__init__.py`:
@@ -363,9 +496,11 @@ Before 1.9.0, every unique ID and the Zendo service device's identifier containe
 - **Records persisted by an older integration.** They have no `device_os_version` or `offline_reason`. They're restored with `device_os_version: null` and `offline_reason: timeout`, and the device's next registration sets both.
 - **Downgrading the integration.** An earlier version builds the old unique IDs again, so its entities get new entity IDs, and it creates a second service device under the entry ID. Avoid downgrading below 1.9.0.
 
-From 1.10.0 (wall panel settings and presence):
+From 1.9.3 (wall panel settings and presence):
 
-- **An older app with a 1.10.0 integration.** Its state has none of the four keys, so its records get none of the new entities. The two new services still send it the command, it answers Method not found, and the call fails saying the device needs a newer version of the Zendo app.
+- **An older app with a 1.9.3 integration.** Its state has none of the four keys, so its records get none of the new entities. The two new services still send it the command, it answers Method not found, and the call fails saying the device needs a newer version of the Zendo app.
 - **A newer app with an older integration.** The integration stores the state as it comes, so it keeps the four keys and lists them in `list_managed_devices`, but it makes no entities for them and has neither service. Automations can't change the settings until the integration is updated.
 - **Records persisted by an older integration.** They have no `optional_entities`, so they're restored without the new entities. Each is made with the device's first state update that has a value for it.
-- **Downgrading below 1.10.0.** The earlier version drops `optional_entities` the next time it persists the records. After upgrading again, the entities come back, with the same entity IDs, with the device's next state update that has a value for them.
+- **Downgrading below 1.9.3.** The earlier version drops `optional_entities` the next time it persists the records. After upgrading again, the entities come back, with the same entity IDs, with the device's next state update that has a value for them.
+
+For the admin code, from 1.9.3, see [Admin Code Compatibility](#admin-code-compatibility).

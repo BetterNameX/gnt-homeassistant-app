@@ -653,3 +653,52 @@ managed_device_wake_on_approach_configure:
               value: "medium"
             - label: "Far"
               value: "far"
+
+managed_device_admin_code_configure:
+  name: Configure device admin code (Kiosk)
+  description: >-
+    Set or remove the admin code on Zendo devices with Always-On Display
+    (Kiosk) on. The devices have to be online. Only Home Assistant
+    administrators can run this action, and a code set here shows in
+    recorded events and traces.
+  fields:
+    device:
+      name: Device
+      description: Required. One or more Zendo devices.
+      required: true
+      selector:
+        device:
+          integration: zendo
+          multiple: true
+    code:
+      name: Code
+      description: >-
+        The admin code to set: exactly 4, 6 or 8 digits. In YAML, put it in
+        quotes. Give either a code or Remove.
+      required: false
+      selector:
+        text:
+          type: password
+    remove:
+      name: Remove
+      description: >-
+        Remove the admin code. Give either a code or Remove.
+      required: false
+      selector:
+        boolean:
+
+managed_device_admin_code_get:
+  name: Get device admin code (Kiosk)
+  description: >-
+    Get the admin code of a Zendo device with Always-On Display (Kiosk) on,
+    even while it's offline. Responds with admin_code, status (set, not_set
+    or unknown) and reported_at. Only Home Assistant administrators can run
+    this action.
+  fields:
+    device:
+      name: Device
+      description: Required. One Zendo device.
+      required: true
+      selector:
+        device:
+          integration: zendo

@@ -52,6 +52,11 @@ Status events: ``bngnt_managed_device_updated`` carries a record exactly as
 ``list_managed_devices`` lists it, and ``bngnt_managed_device_removed``
 carries the ``managed_device_id`` of a record that's gone. The app listens
 to them while it shows device status.
+
+Admin codes: ``admin_code.py`` keeps the admin code each record's device last
+reported, by managed device ID. Deleting a record removes its entry, and a
+takeover moves the caller's to the target. A code never goes in a record, its
+serialisation or an event.
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ import logging
 import time
 import uuid
 from datetime import timedelta
-from typing import Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import voluptuous as vol
 
@@ -91,6 +96,9 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import CONF_MANAGED_DEVICES, DOMAIN, SERVICE_DEVICE_IDENTIFIER
+
+if TYPE_CHECKING:
+    from .admin_code import BNGntAdminCodeStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -467,6 +475,10 @@ class BNGntManagedDeviceCommandError(HomeAssistantError):
         self.code = code
 
 
+class BNGntManagedDeviceTimeoutError(HomeAssistantError):
+    """A device didn't answer a command in time. It may still have run it."""
+
+
 def _build_model(device_brand: str | None, device_model_name: str | None) -> str | None:
     parts = [p for p in [device_brand, device_model_name] if p]
     return " ".join(parts) if parts else None
@@ -550,12 +562,19 @@ def _restored_optional_entities(value: Any) -> list[str]:
 class BNGntManagedDeviceRegistry:
     """Tracks managed devices, the device attached to each, and online status.
 
-    ``_devices`` maps each managed device ID to its record.
+    ``_devices`` maps each managed device ID to its record. ``admin_codes``
+    keeps the admin code each record's device last reported, by the same ID.
     """
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        admin_codes: BNGntAdminCodeStore,
+    ) -> None:
         self._hass = hass
         self._entry = entry
+        self._admin_codes = admin_codes
         self._devices: dict[str, BNGntManagedDeviceRecord] = {}
         self._pending_commands: dict[str, asyncio.Future] = {}
         self._offline_check_unsub: callable | None = None
@@ -608,6 +627,14 @@ class BNGntManagedDeviceRegistry:
     @property
     def devices(self) -> dict[str, BNGntManagedDeviceRecord]:
         return self._devices
+
+    @property
+    def admin_codes(self) -> BNGntAdminCodeStore:
+        return self._admin_codes
+
+    def find_key(self, profile_id: str, device_id: str) -> str | None:
+        """Return the managed device ID the device is attached to, if any."""
+        return self._find_key(profile_id, device_id)
 
     def get_device(self, key: str) -> BNGntManagedDeviceRecord | None:
         return self._devices.get(key)
@@ -688,8 +715,8 @@ class BNGntManagedDeviceRegistry:
 
         Called when kiosk mode is disabled. The record, its HA device and its
         entities stay (not deleted) so automations referencing them don't
-        break -- they just show as unavailable. Returns False when no managed
-        device is attached to the device.
+        break -- they just show as unavailable. So does its admin code entry.
+        Returns False when no managed device is attached to the device.
         """
         key = self._find_key(profile_id, device_id)
         if key is None:
@@ -771,8 +798,11 @@ class BNGntManagedDeviceRegistry:
 
         The target keeps its HA device, entity IDs, area and the name the user
         gave it, and takes the caller's attached ids, device info, state and
-        online status. The caller's own record, HA device and entities are
-        removed. Returns the target's key and its device name from before.
+        online status. It takes the caller's admin code entry too, or loses
+        its own if the caller has none: that was the old device's code, and
+        the record reads unknown until the new device reports.
+        The caller's own record, HA device and entities are removed. Returns
+        the target's key and its device name from before.
 
         Raises ``BNGntManagedDeviceError`` with ``caller_not_registered`` or
         ``target_not_found``.
@@ -795,6 +825,7 @@ class BNGntManagedDeviceRegistry:
         caller = self._devices[caller_key]
         target.update({field: caller.get(field) for field in _ATTACHED_DEVICE_FIELDS})
         self._sync_ha_device(managed_device_id)
+        self._admin_codes.move(caller_key, managed_device_id)
 
         self._forget_device(caller_key)
         self._remove_ha_device(caller_key)
@@ -808,10 +839,11 @@ class BNGntManagedDeviceRegistry:
         return managed_device_id, previous_device_name
 
     def delete_device(self, key: str, *, remove_ha_device: bool = True) -> bool:
-        """Forget an offline managed device. Returns False if there is none.
+        """Forget an offline managed device and its admin code entry.
 
-        Pass ``remove_ha_device=False`` from HA's Delete button, where HA
-        removes the device and its entities itself once this returns.
+        Returns False if there is none. Pass ``remove_ha_device=False`` from
+        HA's Delete button, where HA removes the device and its entities itself
+        once this returns.
 
         Raises ``BNGntManagedDeviceError`` with ``target_online``.
         """
@@ -822,6 +854,7 @@ class BNGntManagedDeviceRegistry:
             raise BNGntManagedDeviceError(ERROR_TARGET_ONLINE)
 
         self._forget_device(key)
+        self._admin_codes.remove(key)
         if remove_ha_device:
             self._remove_ha_device(key)
         self._persist_devices()
@@ -842,9 +875,10 @@ class BNGntManagedDeviceRegistry:
         3. ``handle_command_response`` resolves the Future stored here,
            unblocking this coroutine.
 
-        Raises ``HomeAssistantError`` on timeout or if the device returns
+        Raises ``HomeAssistantError``: ``BNGntManagedDeviceTimeoutError`` on
+        timeout, and ``BNGntManagedDeviceCommandError`` if the device returns
         a JSON-RPC error object. Method not found means the app on the device
-        predates the command, and gets a message that says so.
+        predates the command, and gets a message that says so instead.
         """
         device = self._devices.get(key)
         if not device:
@@ -877,7 +911,7 @@ class BNGntManagedDeviceRegistry:
         try:
             return await asyncio.wait_for(future, timeout=COMMAND_TIMEOUT)
         except asyncio.TimeoutError:
-            raise HomeAssistantError(
+            raise BNGntManagedDeviceTimeoutError(
                 f"Device '{device['device_name']}' did not respond "
                 f"within {COMMAND_TIMEOUT} seconds"
             ) from None

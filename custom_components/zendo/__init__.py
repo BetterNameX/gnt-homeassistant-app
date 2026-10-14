@@ -8,6 +8,7 @@ from typing import Any
 
 import voluptuous as vol
 
+from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
 from homeassistant.core import (
@@ -21,11 +22,22 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.service import async_register_admin_service
 
+from .admin_code import (
+    SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE_SCHEMA,
+    SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET_SCHEMA,
+    BNGntAdminCodeStore,
+    async_remove_store as async_remove_admin_code_store,
+    handle_managed_device_admin_code_configure,
+    handle_managed_device_admin_code_get,
+    ws_report_managed_device_admin_code,
+)
 from .api_client import fetch_profiles, send_notification
 from .const import (
     CONF_CACHED_DEEP_LINK_DESTINATIONS,
     CONF_CACHED_PROFILES,
+    CONF_MANAGED_DEVICES,
     CONF_PUSH_NOTIFICATION_TOKEN,
     CONF_REFRESH_TIMESTAMPS,
     DAILY_REFRESH_LIMIT,
@@ -121,6 +133,8 @@ SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE = (
 SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE = (
     "managed_device_wake_on_approach_configure"
 )
+SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE = "managed_device_admin_code_configure"
+SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET = "managed_device_admin_code_get"
 
 STATIC_SERVICES = [
     SERVICE_SETUP_PUSH_NOTIFICATIONS,
@@ -147,6 +161,8 @@ STATIC_SERVICES = [
     SERVICE_MANAGED_DEVICE_APP_UNLOCK,
     SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE,
     SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE,
+    SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE,
+    SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET,
 ]
 
 # The doorbell ring sound plays a configurable number of times (1-5, default 1).
@@ -338,7 +354,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # --- Managed device registry ---
 
-    registry = BNGntManagedDeviceRegistry(hass, entry)
+    # Loaded first, so that it drops the entries of records that are gone
+    # before anything can report.
+    admin_codes = BNGntAdminCodeStore(hass)
+    await admin_codes.async_load(entry.data.get(CONF_MANAGED_DEVICES, {}))
+
+    registry = BNGntManagedDeviceRegistry(hass, entry, admin_codes)
     hass.data[DOMAIN]["managed_device_registry"] = registry
     await registry.async_start()
 
@@ -788,6 +809,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 supports_response=response_mode,
             )
 
+    # Only an administrator can read or change an admin code. A call with no
+    # user, such as an automation's, is allowed.
+    admin_services = {
+        SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE: (
+            partial(handle_managed_device_admin_code_configure, hass),
+            SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE_SCHEMA,
+            SupportsResponse.NONE,
+        ),
+        SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET: (
+            partial(handle_managed_device_admin_code_get, hass),
+            SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET_SCHEMA,
+            SupportsResponse.ONLY,
+        ),
+    }
+
+    for name, (handler, schema, response_mode) in admin_services.items():
+        if not hass.services.has_service(DOMAIN, name):
+            async_register_admin_service(
+                hass, DOMAIN, name, handler, schema=schema,
+                supports_response=response_mode,
+            )
+
+    # A WebSocket command can't be unregistered: after an unload, it answers
+    # with an error until the entry is set up again.
+    websocket_api.async_register_command(hass, ws_report_managed_device_admin_code)
+
     # --- Profiles cached before device groups ---
 
     # A cache written before device groups can't tell one from a person, so the
@@ -849,6 +896,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         registry = hass.data[DOMAIN].pop("managed_device_registry", None)
         if registry:
             registry.stop()
+            await registry.admin_codes.async_flush()
 
         for name in STATIC_SERVICES:
             hass.services.async_remove(DOMAIN, name)
@@ -863,3 +911,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop("managed_device_entities", None)
 
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove the admin codes kept for the entry's managed devices."""
+    await async_remove_admin_code_store(hass)

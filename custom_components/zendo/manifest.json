@@ -3,6 +3,7 @@
   "name": "Zendo",
   "codeowners": ["@BetterNameX"],
   "config_flow": true,
+  "dependencies": ["websocket_api"],
   "documentation": "https://github.com/BetterNameX/gnt-homeassistant-app",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/BetterNameX/gnt-homeassistant-app/issues",
