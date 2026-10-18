@@ -6,9 +6,11 @@ every connection. The hub keeps the last report, so the code can be looked up
 while the device is offline. See docs/managed-devices.md, "Admin Code".
 
 A code must never reach a log line, an error message, an entity, an attribute,
-a state, an event or ``_serialize_managed_device``. Validation that fails on
-one is done in the handlers with fixed messages, because a voluptuous schema
-error, humanized, ends with the value it rejected and Home Assistant logs it.
+a state, an event or ``_serialize_managed_device``. Only its status does: the
+list item and ``bngnt_managed_device_updated`` carry ``admin_code_status``.
+Validation that fails on a code is done in the handlers with fixed messages,
+because a voluptuous schema error, humanized, ends with the value it rejected
+and Home Assistant logs it.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Iterable
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 import voluptuous as vol
 
@@ -52,9 +54,13 @@ ADMIN_CODE_METHOD = "adminCode.set"
 JSONRPC_INVALID_PARAMS = -32602
 JSONRPC_NOT_SUPPORTED = -32001
 
+# The app and the Homey app know the same three, so keep all three in sync.
 STATUS_SET = "set"
 STATUS_NOT_SET = "not_set"
 STATUS_UNKNOWN = "unknown"
+ADMIN_CODE_STATUSES = (STATUS_SET, STATUS_NOT_SET, STATUS_UNKNOWN)
+
+AdminCodeStatus = Literal["set", "not_set", "unknown"]
 
 _ADMIN_CODE_PATTERN = re.compile(r"[0-9]{4}|[0-9]{6}|[0-9]{8}")
 
@@ -77,6 +83,13 @@ class BNGntAdminCodeEntry(TypedDict):
     code: str | None
     # ISO 8601, UTC: when the device last reported it.
     reported_at: str
+
+
+def admin_code_status(entry: BNGntAdminCodeEntry | None) -> AdminCodeStatus:
+    """Return the status an entry reads as: no entry is unknown."""
+    if entry is None:
+        return STATUS_UNKNOWN
+    return STATUS_SET if entry["code"] is not None else STATUS_NOT_SET
 
 
 def _restored_entry(value: Any) -> BNGntAdminCodeEntry | None:
@@ -137,6 +150,9 @@ class BNGntAdminCodeStore:
     def get(self, key: str) -> BNGntAdminCodeEntry | None:
         return self._entries.get(key)
 
+    def status(self, key: str) -> AdminCodeStatus:
+        return admin_code_status(self._entries.get(key))
+
     @callback
     def report(self, key: str, code: str | None) -> None:
         """Keep what a device reported: its code, or None for no code."""
@@ -152,21 +168,16 @@ class BNGntAdminCodeStore:
             self._schedule_save()
 
     @callback
-    def move(self, from_key: str, to_key: str) -> None:
-        """Give ``to_key`` the entry of ``from_key``, or none if it has none.
+    def keep_on_replace(self, replacement_key: str, target_key: str) -> None:
+        """Settle the target's entry when the replacement takes it over.
 
-        For a takeover: ``to_key``'s own entry is the code of the device that
-        was attached to it before, so it's never kept for the new one. With no
-        entry, ``to_key`` reads unknown until its new device reports.
+        The old device's code state wins, a code, none or unknown: the target
+        keeps its own entry, or stays without one, and the settings restore
+        hands that state to the replacement. The replacement's entry is never
+        moved to the target: it goes with the record it leaves behind.
         """
-        entry = self._entries.pop(from_key, None)
-        if entry is None:
-            removed = self._entries.pop(to_key, None)
-            if removed is not None:
-                self._schedule_save()
-            return
-        self._entries[to_key] = entry
-        self._schedule_save()
+        if self._entries.pop(replacement_key, None) is not None:
+            self._schedule_save()
 
     @callback
     def _schedule_save(self) -> None:
@@ -217,7 +228,8 @@ def ws_report_managed_device_admin_code(
     """Keep the admin code a device reports, or that it has none.
 
     Responds ``registered: false`` when no record has the device attached, as
-    ``update_managed_device_state`` does, and keeps nothing.
+    ``update_managed_device_state`` does, and keeps nothing. A report that
+    changes the record's admin code status fires ``bngnt_managed_device_updated``.
     """
     registry: BNGntManagedDeviceRegistry | None = hass.data.get(DOMAIN, {}).get(
         "managed_device_registry"
@@ -241,7 +253,7 @@ def ws_report_managed_device_admin_code(
 
     key = registry.find_key(msg["profile_id"], msg["device_id"])
     if key is not None:
-        registry.admin_codes.report(key, code)
+        registry.report_admin_code(key, code)
 
     connection.send_result(msg["id"], {"success": True, "registered": key is not None})
 
@@ -290,7 +302,7 @@ async def handle_managed_device_admin_code_get(
         return {"status": STATUS_UNKNOWN, "admin_code": None, "reported_at": None}
 
     return {
-        "status": STATUS_SET if entry["code"] is not None else STATUS_NOT_SET,
+        "status": admin_code_status(entry),
         "admin_code": entry["code"],
         "reported_at": entry["reported_at"],
     }

@@ -90,6 +90,13 @@ from .profiles import (
     people,
     profiles_predate_device_groups,
 )
+from .settings_backup import (
+    BNGntSettingsBackupStore,
+    async_remove_store as async_remove_settings_backup_store,
+    ws_complete_managed_device_settings_restore,
+    ws_get_managed_device_settings_restore,
+    ws_report_managed_device_settings_backup,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -354,12 +361,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # --- Managed device registry ---
 
-    # Loaded first, so that it drops the entries of records that are gone
+    # Loaded first, so that they drop the entries of records that are gone
     # before anything can report.
+    managed_device_ids = list(entry.data.get(CONF_MANAGED_DEVICES, {}))
     admin_codes = BNGntAdminCodeStore(hass)
-    await admin_codes.async_load(entry.data.get(CONF_MANAGED_DEVICES, {}))
+    await admin_codes.async_load(managed_device_ids)
+    settings_backups = BNGntSettingsBackupStore(hass)
+    await settings_backups.async_load(managed_device_ids)
 
-    registry = BNGntManagedDeviceRegistry(hass, entry, admin_codes)
+    registry = BNGntManagedDeviceRegistry(hass, entry, admin_codes, settings_backups)
     hass.data[DOMAIN]["managed_device_registry"] = registry
     await registry.async_start()
 
@@ -834,6 +844,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # A WebSocket command can't be unregistered: after an unload, it answers
     # with an error until the entry is set up again.
     websocket_api.async_register_command(hass, ws_report_managed_device_admin_code)
+    websocket_api.async_register_command(
+        hass, ws_report_managed_device_settings_backup
+    )
+    websocket_api.async_register_command(hass, ws_get_managed_device_settings_restore)
+    websocket_api.async_register_command(
+        hass, ws_complete_managed_device_settings_restore
+    )
 
     # --- Profiles cached before device groups ---
 
@@ -897,6 +914,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if registry:
             registry.stop()
             await registry.admin_codes.async_flush()
+            await registry.settings_backups.async_flush()
 
         for name in STATIC_SERVICES:
             hass.services.async_remove(DOMAIN, name)
@@ -914,5 +932,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Remove the admin codes kept for the entry's managed devices."""
+    """Remove the admin codes and settings backups kept for the entry."""
     await async_remove_admin_code_store(hass)
+    await async_remove_settings_backup_store(hass)

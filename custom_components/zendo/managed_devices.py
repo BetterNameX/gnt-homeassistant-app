@@ -49,13 +49,28 @@ entity once a state update carries a value other than null for it, and keeps
 it from then on.
 
 Status events: ``bngnt_managed_device_updated`` carries a record exactly as
-``list_managed_devices`` lists it, and ``bngnt_managed_device_removed``
-carries the ``managed_device_id`` of a record that's gone. The app listens
-to them while it shows device status.
+``list_managed_devices`` lists it, admin code status included, and also fires
+when a device's admin code report changes that status.
+``bngnt_managed_device_removed`` carries the ``managed_device_id`` of a record
+that's gone. The app listens to them while it shows device status.
+``bngnt_managed_device_replaced`` carries the ``managed_device_id`` of a
+record a replace gave to another device, and that device's ids: the device
+listens for its own.
+
+Replace: the request carries the ids of the replacement, the device that
+takes the record over. It can come from another device, such as an admin's
+phone. The replacement's own record is the one it leaves behind.
 
 Admin codes: ``admin_code.py`` keeps the admin code each record's device last
-reported, by managed device ID. Deleting a record removes its entry, and a
-takeover moves the caller's to the target. A code never goes in a record, its
+reported, by managed device ID. Deleting a record removes its entry. A replace
+leaves the target's entry as it is, or the target without one, and drops the
+replacement's: the old device's code state wins. A code never goes in a
+record, its serialisation or an event: only its status does.
+
+Settings backups: ``settings_backup.py`` keeps each record's latest settings
+backup, by managed device ID, and the restore a replace leaves on the target:
+a snapshot of the target's backup and admin code, for the replacement to
+fetch. Deleting a record removes its entry. None of it goes in a record, its
 serialisation or an event.
 """
 
@@ -99,6 +114,7 @@ from .const import CONF_MANAGED_DEVICES, DOMAIN, SERVICE_DEVICE_IDENTIFIER
 
 if TYPE_CHECKING:
     from .admin_code import BNGntAdminCodeStore
+    from .settings_backup import BNGntSettingsBackupStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,7 +126,7 @@ MANAGED_DEVICE_ID_MAX_LENGTH = 255
 # Expected failures, returned in the service response as ``error`` rather
 # than raised. The app matches these strings, and the Homey app returns the
 # same ones, so keep all three in sync.
-ERROR_CALLER_NOT_REGISTERED = "caller_not_registered"
+ERROR_REPLACEMENT_NOT_REGISTERED = "replacement_not_registered"
 ERROR_TARGET_NOT_FOUND = "target_not_found"
 ERROR_TARGET_ONLINE = "target_online"
 
@@ -126,6 +142,7 @@ OfflineReason = Literal["timeout", "unregistered"]
 # The app subscribes to these by name, and the Homey app emits the same ones.
 EVENT_MANAGED_DEVICE_UPDATED = "bngnt_managed_device_updated"
 EVENT_MANAGED_DEVICE_REMOVED = "bngnt_managed_device_removed"
+EVENT_MANAGED_DEVICE_REPLACED = "bngnt_managed_device_replaced"
 
 # JSON-RPC 2.0's code for a method the device doesn't know: its app predates
 # the command.
@@ -136,7 +153,7 @@ JSONRPC_METHOD_NOT_FOUND = -32601
 ON_OFF = ["on", "off"]
 WAKE_ON_APPROACH_SENSITIVITIES = ["very_close", "close", "medium", "far"]
 
-# What a takeover copies from the caller's record into the target's. Not
+# What a replace copies from the replacement's record into the target's. Not
 # ``optional_entities``: those are entities of the target's HA device, which
 # the target keeps.
 _ATTACHED_DEVICE_FIELDS = (
@@ -520,12 +537,16 @@ class BNGntManagedDeviceRecord(TypedDict):
 
 
 def _serialize_managed_device(
-    hass: HomeAssistant, key: str, device: BNGntManagedDeviceRecord
+    hass: HomeAssistant,
+    key: str,
+    device: BNGntManagedDeviceRecord,
+    admin_code_status: str,
 ) -> dict[str, Any]:
     """Return a record as ``list_managed_devices`` lists it.
 
     ``bngnt_managed_device_updated`` carries exactly this, so the app parses
-    both with the same schema.
+    both with the same schema. ``admin_code_status`` comes from the admin code
+    store: the status only, never the code.
     """
     ha_device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, key)})
     return {
@@ -544,6 +565,7 @@ def _serialize_managed_device(
         "offline_reason": None if device["online"] else device.get("offline_reason"),
         "last_seen": _epoch_ms(device.get("last_seen")),
         "state": device["state"] or None,
+        "admin_code_status": admin_code_status,
     }
 
 
@@ -563,7 +585,9 @@ class BNGntManagedDeviceRegistry:
     """Tracks managed devices, the device attached to each, and online status.
 
     ``_devices`` maps each managed device ID to its record. ``admin_codes``
-    keeps the admin code each record's device last reported, by the same ID.
+    keeps the admin code each record's device last reported, and
+    ``settings_backups`` each record's settings backup and restore, by the
+    same ID.
     """
 
     def __init__(
@@ -571,10 +595,12 @@ class BNGntManagedDeviceRegistry:
         hass: HomeAssistant,
         entry: ConfigEntry,
         admin_codes: BNGntAdminCodeStore,
+        settings_backups: BNGntSettingsBackupStore,
     ) -> None:
         self._hass = hass
         self._entry = entry
         self._admin_codes = admin_codes
+        self._settings_backups = settings_backups
         self._devices: dict[str, BNGntManagedDeviceRecord] = {}
         self._pending_commands: dict[str, asyncio.Future] = {}
         self._offline_check_unsub: callable | None = None
@@ -632,9 +658,31 @@ class BNGntManagedDeviceRegistry:
     def admin_codes(self) -> BNGntAdminCodeStore:
         return self._admin_codes
 
+    @property
+    def settings_backups(self) -> BNGntSettingsBackupStore:
+        return self._settings_backups
+
     def find_key(self, profile_id: str, device_id: str) -> str | None:
         """Return the managed device ID the device is attached to, if any."""
         return self._find_key(profile_id, device_id)
+
+    def serialize(self, key: str) -> dict[str, Any]:
+        """Return the record as ``list_managed_devices`` lists it."""
+        return _serialize_managed_device(
+            self._hass, key, self._devices[key], self._admin_codes.status(key)
+        )
+
+    @callback
+    def report_admin_code(self, key: str, code: str | None) -> None:
+        """Keep the admin code the record's device reported, or None for none.
+
+        Fires ``bngnt_managed_device_updated`` when the record's admin code
+        status changes. A new code with the status still set fires nothing.
+        """
+        status_before = self._admin_codes.status(key)
+        self._admin_codes.report(key, code)
+        if self._admin_codes.status(key) != status_before:
+            self._fire_updated(key)
 
     def get_device(self, key: str) -> BNGntManagedDeviceRecord | None:
         return self._devices.get(key)
@@ -715,7 +763,8 @@ class BNGntManagedDeviceRegistry:
 
         Called when kiosk mode is disabled. The record, its HA device and its
         entities stay (not deleted) so automations referencing them don't
-        break -- they just show as unavailable. So does its admin code entry.
+        break -- they just show as unavailable. So do its admin code and
+        settings backup entries.
         Returns False when no managed device is attached to the device.
         """
         key = self._find_key(profile_id, device_id)
@@ -740,11 +789,13 @@ class BNGntManagedDeviceRegistry:
             self._fire_updated(key)
         return True
 
-    def update_state(self, profile_id: str, device_id: str, state: dict) -> bool:
+    def update_state(
+        self, profile_id: str, device_id: str, state: dict
+    ) -> str | None:
         """Update device state from a heartbeat or state-change push.
 
-        Returns False when no managed device is attached to the device, which
-        tells the app to register again.
+        Returns the record's key, or None when no managed device is attached
+        to the device, which tells the app to register again.
         """
         key = self._find_key(profile_id, device_id)
         if key is None:
@@ -753,7 +804,7 @@ class BNGntManagedDeviceRegistry:
                 profile_id,
                 device_id,
             )
-            return False
+            return None
 
         device = self._devices[key]
         was_offline = not device["online"]
@@ -789,57 +840,80 @@ class BNGntManagedDeviceRegistry:
             or _without_wifi_signal(old_state) != _without_wifi_signal(state)
         ):
             self._fire_updated(key)
-        return True
+        return key
 
     def replace_device(
         self, profile_id: str, device_id: str, managed_device_id: str
     ) -> tuple[str, str]:
-        """Attach the device to the managed device ``managed_device_id``.
+        """Attach the replacement to the managed device ``managed_device_id``.
 
-        The target keeps its HA device, entity IDs, area and the name the user
-        gave it, and takes the caller's attached ids, device info, state and
-        online status. It takes the caller's admin code entry too, or loses
-        its own if the caller has none: that was the old device's code, and
-        the record reads unknown until the new device reports.
-        The caller's own record, HA device and entities are removed. Returns
-        the target's key and its device name from before.
+        The replacement is the device whose ids are given, wherever the
+        request comes from. The target keeps its HA device, entity IDs, area
+        and the name the user gave it, and takes the replacement's attached
+        ids, device info, state and online status.
 
-        Raises ``BNGntManagedDeviceError`` with ``caller_not_registered`` or
-        ``target_not_found``.
+        The target keeps its own admin code entry, or stays without one, and
+        never takes the replacement's. It gets a settings restore for the
+        replacement to fetch: a snapshot of its latest backup and of its admin
+        code status and code, or the data of a restore still pending on it,
+        under a new ID. The record the replacement
+        leaves behind, its HA device, entities and entries are removed.
+        Returns the target's key and its device name from before.
+
+        Raises ``BNGntManagedDeviceError`` with ``replacement_not_registered``
+        or ``target_not_found``.
         """
         # Keep this synchronous: no other service call may run between
         # finding the two records and changing them.
-        caller_key = self._find_key(profile_id, device_id)
-        if caller_key is None:
-            raise BNGntManagedDeviceError(ERROR_CALLER_NOT_REGISTERED)
+        replacement_key = self._find_key(profile_id, device_id)
+        if replacement_key is None:
+            raise BNGntManagedDeviceError(ERROR_REPLACEMENT_NOT_REGISTERED)
 
         target = self._devices.get(managed_device_id)
         if target is None:
             raise BNGntManagedDeviceError(ERROR_TARGET_NOT_FOUND)
 
         # Already attached: a retry after a lost response.
-        if caller_key == managed_device_id:
+        if replacement_key == managed_device_id:
             return managed_device_id, target["device_name"]
 
+        # Read before anything changes: the snapshot is of the device that
+        # was attached to the target.
         previous_device_name = target["device_name"]
-        caller = self._devices[caller_key]
-        target.update({field: caller.get(field) for field in _ATTACHED_DEVICE_FIELDS})
-        self._sync_ha_device(managed_device_id)
-        self._admin_codes.move(caller_key, managed_device_id)
+        admin_code_entry = self._admin_codes.get(managed_device_id)
+        previous_admin_code_status = self._admin_codes.status(managed_device_id)
+        previous_admin_code = (
+            admin_code_entry["code"] if admin_code_entry is not None else None
+        )
 
-        self._forget_device(caller_key)
-        self._remove_ha_device(caller_key)
+        replacement = self._devices[replacement_key]
+        target.update(
+            {field: replacement.get(field) for field in _ATTACHED_DEVICE_FIELDS}
+        )
+        self._sync_ha_device(managed_device_id)
+        self._admin_codes.keep_on_replace(replacement_key, managed_device_id)
+        self._settings_backups.on_replace(
+            replacement_key,
+            managed_device_id,
+            previous_device_name,
+            previous_admin_code_status,
+            previous_admin_code,
+        )
+
+        self._forget_device(replacement_key)
+        self._remove_ha_device(replacement_key)
 
         self._set_entities_available(managed_device_id, target["online"])
         self._update_entity_values(managed_device_id)
         self._create_reported_optional_entities(managed_device_id)
         self._persist_devices()
-        self._fire_removed(caller_key)
+        self._fire_removed(replacement_key)
         self._fire_updated(managed_device_id)
+        self._fire_replaced(managed_device_id)
         return managed_device_id, previous_device_name
 
     def delete_device(self, key: str, *, remove_ha_device: bool = True) -> bool:
-        """Forget an offline managed device and its admin code entry.
+        """Forget an offline managed device and its admin code and backup entries.
 
         Returns False if there is none. Pass ``remove_ha_device=False`` from
         HA's Delete button, where HA removes the device and its entities itself
@@ -855,6 +929,7 @@ class BNGntManagedDeviceRegistry:
 
         self._forget_device(key)
         self._admin_codes.remove(key)
+        self._settings_backups.remove(key)
         if remove_ha_device:
             self._remove_ha_device(key)
         self._persist_devices()
@@ -1040,14 +1115,22 @@ class BNGntManagedDeviceRegistry:
             )
 
     def _fire_updated(self, key: str) -> None:
-        self._hass.bus.async_fire(
-            EVENT_MANAGED_DEVICE_UPDATED,
-            _serialize_managed_device(self._hass, key, self._devices[key]),
-        )
+        self._hass.bus.async_fire(EVENT_MANAGED_DEVICE_UPDATED, self.serialize(key))
 
     def _fire_removed(self, key: str) -> None:
         self._hass.bus.async_fire(
             EVENT_MANAGED_DEVICE_REMOVED, {"managed_device_id": key}
+        )
+
+    def _fire_replaced(self, key: str) -> None:
+        device = self._devices[key]
+        self._hass.bus.async_fire(
+            EVENT_MANAGED_DEVICE_REPLACED,
+            {
+                "managed_device_id": key,
+                "profile_id": device["profile_id"],
+                "device_id": device["device_id"],
+            },
         )
 
     @callback
@@ -1431,7 +1514,13 @@ async def handle_register_managed_device(
         app_version=call.data["app_version"],
         managed_device_id=call.data.get("managed_device_id"),
     )
-    return {"success": True, "managed_device_id": managed_device_id}
+    return {
+        "success": True,
+        "managed_device_id": managed_device_id,
+        "settings_restore_pending": registry.settings_backups.has_restore(
+            managed_device_id
+        ),
+    }
 
 
 async def handle_unregister_managed_device(
@@ -1472,12 +1561,18 @@ async def handle_update_managed_device_state(
     if not isinstance(state, dict):
         raise HomeAssistantError("state must be a JSON object")
 
-    registered = registry.update_state(
+    key = registry.update_state(
         profile_id=call.data["profile_id"],
         device_id=call.data["device_id"],
         state=state,
     )
-    return {"success": True, "registered": registered}
+    return {
+        "success": True,
+        "registered": key is not None,
+        "settings_restore_pending": (
+            key is not None and registry.settings_backups.has_restore(key)
+        ),
+    }
 
 
 async def handle_list_managed_devices(
@@ -1486,8 +1581,7 @@ async def handle_list_managed_devices(
     registry = _get_registry(hass)
     return {
         "managed_devices": [
-            _serialize_managed_device(hass, key, device)
-            for key, device in registry.list_devices()
+            registry.serialize(key) for key, _ in registry.list_devices()
         ]
     }
 

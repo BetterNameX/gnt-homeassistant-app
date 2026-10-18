@@ -350,26 +350,30 @@ list_managed_devices:
 replace_managed_device:
   name: Replace managed device [Internal]
   description: >-
-    Attach this device to another managed device, so automations that control
-    that managed device control this device instead. This device's own managed
-    device is removed. This is an internal service called by the Zendo app and
-    should not be called manually.
+    Attach the replacement, the Zendo device whose profile ID and device ID are
+    given, to another managed device, so automations that control that managed
+    device control the replacement instead. The request can come from any
+    device, such as an admin's phone. The replacement's own managed device, the
+    one it leaves behind, is removed. This is an internal service called by the
+    Zendo app and should not be called manually.
   fields:
     profile_id:
       name: Profile ID
-      description: Required. The profile ID that owns this device.
+      description: >-
+        Required. The profile ID of the replacement, the device that takes the
+        managed device's place.
       required: true
       selector:
         text:
     device_id:
       name: Device ID
-      description: Required. The unique device identifier.
+      description: Required. The device ID of the replacement.
       required: true
       selector:
         text:
     managed_device_id:
       name: Managed device ID
-      description: Required. The managed device to take over.
+      description: Required. The managed device the replacement takes over.
       required: true
       selector:
         text:
