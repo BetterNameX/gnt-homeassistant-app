@@ -8,5 +8,5 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/BetterNameX/gnt-homeassistant-app/issues",
   "requirements": [],
-  "version": "1.9.3"
+  "version": "1.9.4"
 }
