@@ -164,6 +164,10 @@
           "name": "Device model name",
           "description": "Required. The device model name (e.g. \"iPad Pro\"). Can be null."
         },
+        "device_model_slug": {
+          "name": "Device model slug",
+          "description": "Optional. The ID of the device's model in the Zendo app's wall panel catalogue. Only a wall panel has one. Can be null."
+        },
         "device_os": {
           "name": "Device OS",
           "description": "Required. The device operating system (e.g. \"ios\", \"android\")."

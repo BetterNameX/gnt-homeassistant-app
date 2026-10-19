@@ -163,6 +163,7 @@ _ATTACHED_DEVICE_FIELDS = (
     "device_brand",
     "device_type",
     "device_model_name",
+    "device_model_slug",
     "device_os",
     "device_os_version",
     "app_version",
@@ -323,6 +324,13 @@ def _managed_device_id_hint(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _device_model_slug(value: Any) -> str | None:
+    # Only the app reads it, so a value it can't use counts as no slug rather
+    # than failing the registration. Its form isn't checked: the app's panel
+    # catalogue owns the slugs.
+    return value if isinstance(value, str) and value else None
+
+
 SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA = vol.Schema(
     {
         vol.Required("profile_id"): vol.All(cv.string, vol.Length(min=1)),
@@ -331,6 +339,7 @@ SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA = vol.Schema(
         vol.Required("device_brand"): vol.Any(None, cv.string),
         vol.Required("device_type"): vol.All(cv.string, vol.Length(min=1)),
         vol.Required("device_model_name"): vol.Any(None, cv.string),
+        vol.Optional("device_model_slug"): _device_model_slug,
         vol.Required("device_os"): vol.All(cv.string, vol.Length(min=1)),
         vol.Optional("device_os_version"): vol.Any(None, cv.string),
         vol.Required("app_version"): vol.All(cv.string, vol.Length(min=1)),
@@ -522,6 +531,9 @@ class BNGntManagedDeviceRecord(TypedDict):
     device_brand: str | None
     device_type: str
     device_model_name: str | None
+    # The panel catalogue's ID for the model, or None: only a wall
+    # panel has one. It tells a wall panel from a tablet, as device_type can't.
+    device_model_slug: str | None
     device_os: str
     device_os_version: str | None
     app_version: str | None
@@ -558,6 +570,7 @@ def _serialize_managed_device(
         "device_brand": device.get("device_brand"),
         "device_type": device.get("device_type"),
         "device_model_name": device.get("device_model_name"),
+        "device_model_slug": device.get("device_model_slug"),
         "device_os": device.get("device_os"),
         "device_os_version": device.get("device_os_version"),
         "app_version": device.get("app_version"),
@@ -699,6 +712,7 @@ class BNGntManagedDeviceRegistry:
         device_brand: str | None,
         device_type: str,
         device_model_name: str | None,
+        device_model_slug: str | None,
         device_os: str,
         device_os_version: str | None,
         app_version: str,
@@ -725,6 +739,7 @@ class BNGntManagedDeviceRegistry:
             "device_brand": device_brand,
             "device_type": device_type,
             "device_model_name": device_model_name,
+            "device_model_slug": device_model_slug,
             "device_os": device_os,
             "device_os_version": device_os_version,
             "app_version": app_version,
@@ -1155,6 +1170,7 @@ class BNGntManagedDeviceRegistry:
         offline_reason = info.get("offline_reason")
         self._devices[key] = {
             **info,
+            "device_model_slug": info.get("device_model_slug"),
             "device_os_version": info.get("device_os_version"),
             "online": False,
             # A record that was online when HA stopped has no reason, and nor
@@ -1295,6 +1311,7 @@ class BNGntManagedDeviceRegistry:
                 "device_brand": device.get("device_brand"),
                 "device_type": device.get("device_type", ""),
                 "device_model_name": device.get("device_model_name"),
+                "device_model_slug": device.get("device_model_slug"),
                 "device_os": device.get("device_os", ""),
                 "device_os_version": device.get("device_os_version"),
                 "app_version": device.get("app_version"),
@@ -1509,6 +1526,7 @@ async def handle_register_managed_device(
         device_brand=call.data["device_brand"],
         device_type=call.data["device_type"],
         device_model_name=call.data["device_model_name"],
+        device_model_slug=call.data.get("device_model_slug"),
         device_os=call.data["device_os"],
         device_os_version=call.data.get("device_os_version"),
         app_version=call.data["app_version"],

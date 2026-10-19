@@ -234,6 +234,14 @@ register_managed_device:
       required: true
       selector:
         text:
+    device_model_slug:
+      name: Device model slug
+      description: >-
+        Optional. The ID of the device's model in the Zendo app's wall panel
+        catalogue. Only a wall panel has one. Can be null.
+      required: false
+      selector:
+        text:
     device_os:
       name: Device OS
       description: Required. The device operating system (e.g. "ios", "android").
