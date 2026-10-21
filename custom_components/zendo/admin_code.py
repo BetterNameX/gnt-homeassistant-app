@@ -26,7 +26,6 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -39,6 +38,7 @@ from .managed_devices import (
     BNGntManagedDeviceTimeoutError,
     _get_registry,
     _resolve_devices_for_command,
+    async_get_ha_device,
 )
 
 STORAGE_VERSION = 1
@@ -366,7 +366,7 @@ def _code_from_call(call: ServiceCall) -> str | None:
 def _device_label(
     hass: HomeAssistant, registry: BNGntManagedDeviceRegistry, key: str
 ) -> str:
-    ha_device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, key)})
+    ha_device = async_get_ha_device(hass, registry.config_entry_id, key)
     if ha_device is not None and ha_device.name_by_user:
         return ha_device.name_by_user
     device = registry.get_device(key)

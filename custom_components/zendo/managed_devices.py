@@ -533,6 +533,27 @@ def _epoch_ms(timestamp: float | None) -> int | None:
     return int(timestamp * 1000) if timestamp else None
 
 
+# Home Assistant 2026.8 added async_get_device_by_identifier, as an identifier
+# is unique only within a config entry from then on, and 2026.9 deprecates
+# async_get_device. Before 2026.8 an identifier is unique across the registry,
+# so the fallback needs no config entry. Drop the fallback once hacs.json's
+# minimum is 2026.8 or later.
+_HAS_DEVICE_BY_IDENTIFIER = hasattr(dr.DeviceRegistry, "async_get_device_by_identifier")
+
+
+@callback
+def async_get_ha_device(
+    hass: HomeAssistant, config_entry_id: str, identifier: str
+) -> dr.DeviceEntry | None:
+    """Return the config entry's HA device for ``(DOMAIN, identifier)``."""
+    dev_reg = dr.async_get(hass)
+    if _HAS_DEVICE_BY_IDENTIFIER:
+        return dev_reg.async_get_device_by_identifier(
+            (DOMAIN, identifier), config_entry_id
+        )
+    return dev_reg.async_get_device(identifiers={(DOMAIN, identifier)})
+
+
 class BNGntManagedDeviceRecord(TypedDict):
     """A managed device's record, keyed by its managed device ID."""
 
@@ -567,6 +588,7 @@ class BNGntManagedDeviceRecord(TypedDict):
 
 def _serialize_managed_device(
     hass: HomeAssistant,
+    config_entry_id: str,
     key: str,
     device: BNGntManagedDeviceRecord,
     admin_code_status: str,
@@ -577,7 +599,7 @@ def _serialize_managed_device(
     both with the same schema. ``admin_code_status`` comes from the admin code
     store: the status only, never the code.
     """
-    ha_device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, key)})
+    ha_device = async_get_ha_device(hass, config_entry_id, key)
     return {
         "managed_device_id": key,
         "profile_id": device["profile_id"],
@@ -694,6 +716,10 @@ class BNGntManagedDeviceRegistry:
     def settings_backups(self) -> BNGntSettingsBackupStore:
         return self._settings_backups
 
+    @property
+    def config_entry_id(self) -> str:
+        return self._entry.entry_id
+
     def find_key(self, profile_id: str, device_id: str) -> str | None:
         """Return the managed device ID the device is attached to, if any."""
         return self._find_key(profile_id, device_id)
@@ -701,7 +727,11 @@ class BNGntManagedDeviceRegistry:
     def serialize(self, key: str) -> dict[str, Any]:
         """Return the record as ``list_managed_devices`` lists it."""
         return _serialize_managed_device(
-            self._hass, key, self._devices[key], self._admin_codes.status(key)
+            self._hass,
+            self._entry.entry_id,
+            key,
+            self._devices[key],
+            self._admin_codes.status(key),
         )
 
     @callback
@@ -1145,14 +1175,10 @@ class BNGntManagedDeviceRegistry:
         self._hass.data[DOMAIN].get("managed_device_entities", {}).pop(key, None)
 
     def _remove_ha_device(self, key: str) -> None:
-        # With no other config entry left on it, HA removes the device and
-        # its entities.
-        dev_reg = dr.async_get(self._hass)
-        ha_device = dev_reg.async_get_device(identifiers={(DOMAIN, key)})
+        # HA removes the device's entities with it.
+        ha_device = async_get_ha_device(self._hass, self._entry.entry_id, key)
         if ha_device is not None:
-            dev_reg.async_update_device(
-                ha_device.id, remove_config_entry_id=self._entry.entry_id
-            )
+            dr.async_get(self._hass).async_remove_device(ha_device.id)
 
     def _fire_updated(self, key: str) -> None:
         self._hass.bus.async_fire(EVENT_MANAGED_DEVICE_UPDATED, self.serialize(key))

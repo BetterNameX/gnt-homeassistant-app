@@ -630,7 +630,7 @@ For example, an admin replaces the panel "Hallway" with "Hallway 2". Hallway 2 i
    - The target's device name, admin code status and code are read first, for the settings restore, before anything changes.
    - The target takes the replacement's attached ids, device info (including `device_os_version`, `device_model_slug`, `device_launcher_id` and `device_serial_number`), app version, state, `online`, `offline_reason` and `last_seen`.
    - The target's Home Assistant device gets the replacement's name, model, serial number and app version. Its device ID, entity IDs, area and `name_by_user` stay.
-   - The record the replacement leaves behind is removed. Its config entry is removed from its Home Assistant device, and Home Assistant then removes that device and its entities.
+   - The record the replacement leaves behind is removed, and so is its Home Assistant device. Home Assistant removes the device's entities with it.
    - The target's entities take the replacement's availability and state. The target keeps its optional entities, and gets any the replacement's state has a value for (see [Created When Reported](#created-when-reported)).
    - The old device's code state wins: the target keeps its admin code entry, `set` or `not_set`, or stays `unknown` without one, and never takes the replacement's (see [Admin Code](#admin-code)).
    - The target gets a settings restore, a snapshot of its latest backup and of its admin code status and code, for the replacement to fetch. The replacement's own backup entry is removed (see [Settings Backup](#settings-backup)).
@@ -645,7 +645,7 @@ An online target can be taken over: the app asks for a second confirmation, and 
 
 Only offline managed devices can be deleted. Both ways go through `BNGntManagedDeviceRegistry.delete_device`, which removes the record's admin code entry (see [Admin Code](#admin-code)) and its settings backup entry, pending restore included (see [Settings Backup](#settings-backup)), and fires `bngnt_managed_device_removed`.
 
-- **`delete_managed_device`** forgets the record and removes the config entry from its Home Assistant device, so Home Assistant removes the device and its entities. An unknown managed device ID returns `deleted: false`.
+- **`delete_managed_device`** forgets the record and removes its Home Assistant device, and Home Assistant removes the device's entities with it. An unknown managed device ID returns `deleted: false`.
 - **The Delete button** on a managed device's page in Home Assistant calls `async_remove_config_entry_device` in `__init__.py`:
   - The Zendo service device can't be deleted.
   - Nothing can be deleted while the integration isn't loaded.

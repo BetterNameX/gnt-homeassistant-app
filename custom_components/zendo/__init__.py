@@ -66,6 +66,7 @@ from .managed_devices import (
     SERVICE_REPLACE_MANAGED_DEVICE_SCHEMA,
     SERVICE_UNREGISTER_MANAGED_DEVICE_SCHEMA,
     SERVICE_UPDATE_MANAGED_DEVICE_STATE_SCHEMA,
+    async_get_ha_device,
     handle_delete_managed_device,
     handle_list_managed_devices,
     handle_managed_device_app_lock,
@@ -328,12 +329,11 @@ def _move_service_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
     Changing only the entities' DeviceInfo would add a second service device
     beside this one.
     """
-    dev_reg = dr.async_get(hass)
-    old_device = dev_reg.async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    old_device = async_get_ha_device(hass, entry.entry_id, entry.entry_id)
     if old_device is None:
         return
 
-    if dev_reg.async_get_device(identifiers={(DOMAIN, SERVICE_DEVICE_IDENTIFIER)}):
+    if async_get_ha_device(hass, entry.entry_id, SERVICE_DEVICE_IDENTIFIER):
         _LOGGER.warning(
             "Can't move device %s to identifier %s, which another device has",
             old_device.id,
@@ -341,7 +341,7 @@ def _move_service_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
         )
         return
 
-    dev_reg.async_update_device(
+    dr.async_get(hass).async_update_device(
         old_device.id, new_identifiers={(DOMAIN, SERVICE_DEVICE_IDENTIFIER)}
     )
 
