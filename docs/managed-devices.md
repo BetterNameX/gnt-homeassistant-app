@@ -13,12 +13,12 @@ The code lives in `custom_components/zendo/managed_devices.py`, the admin code i
 The integration owns each managed device. It keeps one **record** per managed device, keyed by a **managed device ID**:
 
 - The managed device ID is also the Home Assistant device identifier `(zendo, <managed device ID>)`, and the entities' unique IDs are `md_<managed device ID>_<property>`. Automations point at the Home Assistant device, so they follow the record.
-- The record holds the Zendo device that is **attached** to it right now: its `profile_id` and `device_id`, plus its name, model (and a wall panel's model slug), operating system and its version, app version, last state, whether it's online, why it's offline and when it was last seen.
+- The record holds the Zendo device that is **attached** to it right now: its `profile_id` and `device_id`, plus its name, model (and a wall panel's model slug, launcher ID and serial number), operating system and its version, app version, last state, whether it's online, why it's offline and when it was last seen.
 - The attached device can change. A replacement tablet can take over a record (see [Replacing a Device](#replacing-a-device)), and the record keeps its managed device ID, Home Assistant device, entity IDs, area and the name the user gave it.
 
 **Managed device IDs are opaque.** Never build one from a profile ID and device ID, and never parse one. Records made before 1.9.0 have the ID `<profile_id>_<device_id>`, and new ones may have that form too, but a record's ID says nothing about the device attached to it now.
 
-Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. A record's admin code and settings backup aren't: each has its own store (see [Admin Code](#admin-code) and [Settings Backup](#settings-backup)). The persisted fields are the attached ids, the device info (including `device_os_version` and, from 1.9.5, `device_model_slug`), the app version, `offline_reason`, `last_seen` and, from 1.9.3, `optional_entities` (see [Created When Reported](#created-when-reported)). The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets.
+Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. A record's admin code and settings backup aren't: each has its own store (see [Admin Code](#admin-code) and [Settings Backup](#settings-backup)). The persisted fields are the attached ids, the device info (including `device_os_version`, from 1.9.5 `device_model_slug`, and from 1.9.6 `device_launcher_id` and `device_serial_number`), the app version, `offline_reason`, `last_seen` and, from 1.9.3, `optional_entities` (see [Created When Reported](#created-when-reported)). The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets.
 
 `last_seen` is a Unix timestamp in seconds: when the device was last in touch with Home Assistant.
 
@@ -76,7 +76,7 @@ All of these are internal services, called by the Zendo app. Field names and res
 
 | Service | Fields | Response mode | Response |
 |---|---|---|---|
-| `register_managed_device` | `profile_id`, `device_id`, `device_name`, `device_brand`, `device_type`, `device_model_name`, optional `device_model_slug`, `device_os`, optional `device_os_version`, `app_version`, optional `managed_device_id` | optional | `{success: true, managed_device_id, settings_restore_pending}` |
+| `register_managed_device` | `profile_id`, `device_id`, `device_name`, `device_brand`, `device_type`, `device_model_name`, optional `device_model_slug`, optional `device_launcher_id`, optional `device_serial_number`, `device_os`, optional `device_os_version`, `app_version`, optional `managed_device_id` | optional | `{success: true, managed_device_id, settings_restore_pending}` |
 | `unregister_managed_device` | `profile_id`, `device_id` | optional | `{success: true, registered}` |
 | `update_managed_device_state` | `profile_id`, `device_id`, `state` | optional | `{success: true, registered, settings_restore_pending}` |
 | `list_managed_devices` | none | only | `{managed_devices: [...]}` |
@@ -91,6 +91,14 @@ All of these are internal services, called by the Zendo app. Field names and res
 - No field, `null`, an empty string or a value that isn't a string all read as `null`, never as an error.
 - Every registration sets it, like the rest of the device info, so a device that stops sending it ends with `null`.
 - It isn't part of the Home Assistant device's model, which stays the brand and model name.
+
+`device_launcher_id` and `device_serial_number`, from 1.9.6, are what Zendo Launcher on a wall panel tells the app, or `null`. The launcher ID is Zendo Launcher's own ID for the panel (for example `K7QM3T`), which the app shows as Launcher ID. It's unrelated to `device_id` and to the managed device ID. The serial number is the panel's hardware serial, which Zendo Launcher reports once Zendo Provisioning has given it one. The app sends each only when it knows it: phones, tablets and any device without Zendo Launcher send neither, and a wall panel whose launcher has no serial number yet sends only the launcher ID.
+
+- The integration stores them as they come and doesn't check their form: Zendo Launcher owns both.
+- No field, `null`, an empty string or a value that isn't a string all read as `null`, never as an error.
+- Every registration sets them, like the rest of the device info, so a device that stops sending one ends with `null`.
+- `device_serial_number` is also the Home Assistant device's serial number, set and cleared with it. The launcher ID is in none of the Home Assistant device's fields.
+- The launcher usually answers the app after the app has registered, so the app registers again when either value changes.
 
 `settings_restore_pending`, from 1.9.4, is `true` while the record attached to the device has a settings restore for it to fetch, and `false` with `registered: false`. See [Settings Backup](#settings-backup).
 
@@ -149,6 +157,8 @@ managed_devices:
     device_type: "tablet"
     device_model_name: "iPad Air"
     device_model_slug: null
+    device_launcher_id: null
+    device_serial_number: null
     device_os: "ios"
     device_os_version: "18.5"
     app_version: "26.10.1"
@@ -174,6 +184,8 @@ managed_devices:
     device_type: "tablet"
     device_model_name: "Galaxy Tab A9"
     device_model_slug: null
+    device_launcher_id: null
+    device_serial_number: null
     device_os: "android"
     device_os_version: null
     app_version: "26.9.4"
@@ -187,6 +199,7 @@ managed_devices:
 - `name_by_user` is the name the user gave the device in Home Assistant, or `null`.
 - `device_os_version` is `null` when the app didn't send it.
 - `device_model_slug`, from 1.9.5, is the wall panel catalogue's ID for the device's model, and `null` for any device that isn't a wall panel. See [Services](#services).
+- `device_launcher_id` and `device_serial_number`, from 1.9.6, are Zendo Launcher's ID for a wall panel and the panel's hardware serial number, each `null` while the app doesn't know it. See [Services](#services).
 - `offline_reason` is `timeout` or `unregistered` while the record is offline, and `null` while it's online. See [Online Status](#online-status).
 - `last_seen` is in milliseconds since the Unix epoch, or `null` when the device hasn't been seen since it was restored from a version before 1.9.0.
 - `state` is the last state the device sent, exactly as it sent it, or `null` when it hasn't sent one since the record was made or Home Assistant started. An offline record keeps its last state until Home Assistant restarts.
@@ -615,8 +628,8 @@ For example, an admin replaces the panel "Hallway" with "Hallway 2". Hallway 2 i
 3. The replacement is already attached to the target: success, with no change and no events. A retry after a lost response is safe. `previous_device_name` is then the target's current name.
 4. Otherwise:
    - The target's device name, admin code status and code are read first, for the settings restore, before anything changes.
-   - The target takes the replacement's attached ids, device info (including `device_os_version` and `device_model_slug`), app version, state, `online`, `offline_reason` and `last_seen`.
-   - The target's Home Assistant device gets the replacement's name, model and app version. Its device ID, entity IDs, area and `name_by_user` stay.
+   - The target takes the replacement's attached ids, device info (including `device_os_version`, `device_model_slug`, `device_launcher_id` and `device_serial_number`), app version, state, `online`, `offline_reason` and `last_seen`.
+   - The target's Home Assistant device gets the replacement's name, model, serial number and app version. Its device ID, entity IDs, area and `name_by_user` stay.
    - The record the replacement leaves behind is removed. Its config entry is removed from its Home Assistant device, and Home Assistant then removes that device and its entities.
    - The target's entities take the replacement's availability and state. The target keeps its optional entities, and gets any the replacement's state has a value for (see [Created When Reported](#created-when-reported)).
    - The old device's code state wins: the target keeps its admin code entry, `set` or `not_set`, or stays `unknown` without one, and never takes the replacement's (see [Admin Code](#admin-code)).
@@ -691,3 +704,10 @@ From 1.9.5 (the model slug):
 - **A newer app with an older integration.** The integration drops the unknown `device_model_slug` field, and its list items and `bngnt_managed_device_updated` have no `device_model_slug` key, so the app must read a missing key as `null`. A wall panel shows as a tablet until the integration is updated.
 - **Records persisted by an older integration.** They have no `device_model_slug`. They're restored with `null`, with no migration step, and the device's next registration sets it.
 - **Downgrading below 1.9.5.** The earlier version drops `device_model_slug` the next time it persists the records. After upgrading again, each device's next registration sets it.
+
+From 1.9.6 (the launcher ID and serial number):
+
+- **An older app with a 1.9.6 integration.** It sends neither field, so its records have `null` for both and their Home Assistant devices have no serial number. It ignores the new list fields.
+- **A newer app with an older integration.** The integration drops the unknown `device_launcher_id` and `device_serial_number` fields, and its list items and `bngnt_managed_device_updated` have neither key, so the app must read a missing key as `null`. The app doesn't check the integration's version for them: it shows each only when the record has it.
+- **Records persisted by an older integration.** They have neither key. They're restored with `null`, with no migration step, and with no serial number on their Home Assistant devices. The device's next registration sets them.
+- **Downgrading below 1.9.6.** The earlier version drops both the next time it persists the records. It never sets a Home Assistant device's serial number, so each keeps the one it had, even after a replace attaches another device. After upgrading again, the restore clears it, and each device's next registration sets both.

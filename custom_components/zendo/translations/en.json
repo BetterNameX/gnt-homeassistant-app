@@ -168,6 +168,14 @@
           "name": "Device model slug",
           "description": "Optional. The ID of the device's model in the Zendo app's wall panel catalogue. Only a wall panel has one. Can be null."
         },
+        "device_launcher_id": {
+          "name": "Device launcher ID",
+          "description": "Optional. Zendo Launcher's ID for the wall panel it runs on. Only a wall panel with Zendo Launcher has one. Can be null."
+        },
+        "device_serial_number": {
+          "name": "Device serial number",
+          "description": "Optional. The wall panel's hardware serial number, as Zendo Launcher reports it. It also sets the Home Assistant device's serial number. Can be null."
+        },
         "device_os": {
           "name": "Device OS",
           "description": "Required. The device operating system (e.g. \"ios\", \"android\")."

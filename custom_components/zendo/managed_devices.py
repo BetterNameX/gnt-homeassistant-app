@@ -164,6 +164,8 @@ _ATTACHED_DEVICE_FIELDS = (
     "device_type",
     "device_model_name",
     "device_model_slug",
+    "device_launcher_id",
+    "device_serial_number",
     "device_os",
     "device_os_version",
     "app_version",
@@ -331,6 +333,13 @@ def _device_model_slug(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _launcher_value(value: Any) -> str | None:
+    # A value the launcher reported through the app. The launcher owns its
+    # form, so it isn't checked here, and anything that isn't a non-empty
+    # string counts as unknown rather than failing the registration.
+    return value if isinstance(value, str) and value else None
+
+
 SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA = vol.Schema(
     {
         vol.Required("profile_id"): vol.All(cv.string, vol.Length(min=1)),
@@ -340,6 +349,8 @@ SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA = vol.Schema(
         vol.Required("device_type"): vol.All(cv.string, vol.Length(min=1)),
         vol.Required("device_model_name"): vol.Any(None, cv.string),
         vol.Optional("device_model_slug"): _device_model_slug,
+        vol.Optional("device_launcher_id"): _launcher_value,
+        vol.Optional("device_serial_number"): _launcher_value,
         vol.Required("device_os"): vol.All(cv.string, vol.Length(min=1)),
         vol.Optional("device_os_version"): vol.Any(None, cv.string),
         vol.Required("app_version"): vol.All(cv.string, vol.Length(min=1)),
@@ -534,6 +545,12 @@ class BNGntManagedDeviceRecord(TypedDict):
     # The panel catalogue's ID for the model, or None: only a wall
     # panel has one. It tells a wall panel from a tablet, as device_type can't.
     device_model_slug: str | None
+    # A wall panel's launcher reports these, or None while the app doesn't
+    # know them. The launcher ID is the launcher's own ID for the panel and
+    # unrelated to device_id. The serial number is the panel's hardware
+    # serial, and is the HA device's serial number too.
+    device_launcher_id: str | None
+    device_serial_number: str | None
     device_os: str
     device_os_version: str | None
     app_version: str | None
@@ -571,6 +588,8 @@ def _serialize_managed_device(
         "device_type": device.get("device_type"),
         "device_model_name": device.get("device_model_name"),
         "device_model_slug": device.get("device_model_slug"),
+        "device_launcher_id": device.get("device_launcher_id"),
+        "device_serial_number": device.get("device_serial_number"),
         "device_os": device.get("device_os"),
         "device_os_version": device.get("device_os_version"),
         "app_version": device.get("app_version"),
@@ -713,6 +732,8 @@ class BNGntManagedDeviceRegistry:
         device_type: str,
         device_model_name: str | None,
         device_model_slug: str | None,
+        device_launcher_id: str | None,
+        device_serial_number: str | None,
         device_os: str,
         device_os_version: str | None,
         app_version: str,
@@ -740,6 +761,8 @@ class BNGntManagedDeviceRegistry:
             "device_type": device_type,
             "device_model_name": device_model_name,
             "device_model_slug": device_model_slug,
+            "device_launcher_id": device_launcher_id,
+            "device_serial_number": device_serial_number,
             "device_os": device_os,
             "device_os_version": device_os_version,
             "app_version": app_version,
@@ -1105,12 +1128,14 @@ class BNGntManagedDeviceRegistry:
             name=device["device_name"],
             manufacturer="Zendo",
             model=model,
+            serial_number=device.get("device_serial_number"),
             sw_version=device.get("app_version"),
         )
         dev_reg.async_update_device(
             ha_device.id,
             name=device["device_name"],
             model=model,
+            serial_number=device.get("device_serial_number"),
             sw_version=device.get("app_version"),
         )
         device["ha_device_id"] = ha_device.id
@@ -1171,6 +1196,8 @@ class BNGntManagedDeviceRegistry:
         self._devices[key] = {
             **info,
             "device_model_slug": info.get("device_model_slug"),
+            "device_launcher_id": info.get("device_launcher_id"),
+            "device_serial_number": info.get("device_serial_number"),
             "device_os_version": info.get("device_os_version"),
             "online": False,
             # A record that was online when HA stopped has no reason, and nor
@@ -1312,6 +1339,8 @@ class BNGntManagedDeviceRegistry:
                 "device_type": device.get("device_type", ""),
                 "device_model_name": device.get("device_model_name"),
                 "device_model_slug": device.get("device_model_slug"),
+                "device_launcher_id": device.get("device_launcher_id"),
+                "device_serial_number": device.get("device_serial_number"),
                 "device_os": device.get("device_os", ""),
                 "device_os_version": device.get("device_os_version"),
                 "app_version": device.get("app_version"),
@@ -1340,6 +1369,7 @@ def _device_info_from_dict(key: str, device_info: dict) -> DeviceInfo:
         name=device_info["device_name"],
         manufacturer="Zendo",
         model=model,
+        serial_number=device_info.get("device_serial_number"),
         sw_version=device_info.get("app_version"),
     )
 
@@ -1527,6 +1557,8 @@ async def handle_register_managed_device(
         device_type=call.data["device_type"],
         device_model_name=call.data["device_model_name"],
         device_model_slug=call.data.get("device_model_slug"),
+        device_launcher_id=call.data.get("device_launcher_id"),
+        device_serial_number=call.data.get("device_serial_number"),
         device_os=call.data["device_os"],
         device_os_version=call.data.get("device_os_version"),
         app_version=call.data["app_version"],
