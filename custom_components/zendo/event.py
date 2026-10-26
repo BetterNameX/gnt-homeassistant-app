@@ -96,3 +96,13 @@ class BNGntDeviceGroupEventEntity(EventEntity):
             DOMAIN
         ].get("device_group_entities", {})
         entities.pop(self.entity_id, None)
+
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Re-key this entity in hass.data so the services still resolve it."""
+        super().async_entity_id_changed(old_entity_id)
+        entities: dict[str, BNGntDeviceGroupEventEntity] = self.hass.data[
+            DOMAIN
+        ].setdefault("device_group_entities", {})
+        entities.pop(old_entity_id, None)
+        entities[self.entity_id] = self

@@ -12,7 +12,7 @@ import logging
 
 from homeassistant.components.notify import NotifyEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -114,3 +114,13 @@ class BNGntNotifyEntity(NotifyEntity):
             "notify_entities", {}
         )
         entities.pop(self.entity_id, None)
+
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Re-key this entity in hass.data so the services still resolve it."""
+        super().async_entity_id_changed(old_entity_id)
+        entities: dict[str, BNGntNotifyEntity] = self.hass.data[DOMAIN].setdefault(
+            "notify_entities", {}
+        )
+        entities.pop(old_entity_id, None)
+        entities[self.entity_id] = self

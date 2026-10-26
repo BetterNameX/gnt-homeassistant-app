@@ -1479,6 +1479,11 @@ class BNGntManagedDeviceSensor(SensorEntity):
         if self in device_entities:
             device_entities.remove(self)
 
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Opt in to in-place entity_id changes: nothing here is keyed on it."""
+        super().async_entity_id_changed(old_entity_id)
+
 
 class BNGntManagedDeviceBinarySensor(BinarySensorEntity):
     """A binary sensor entity for a single property of a managed device."""
@@ -1555,6 +1560,11 @@ class BNGntManagedDeviceBinarySensor(BinarySensorEntity):
         device_entities = entities.get(self._key, [])
         if self in device_entities:
             device_entities.remove(self)
+
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Opt in to in-place entity_id changes: nothing here is keyed on it."""
+        super().async_entity_id_changed(old_entity_id)
 
 
 # ---------------------------------------------------------------------------
