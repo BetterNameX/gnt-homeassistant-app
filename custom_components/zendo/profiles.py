@@ -1,6 +1,6 @@
 """Site profiles listed by the control backend: people and device groups.
 
-A device group holds the wall panels and tablets that belong to the home
+A device group holds the wall panels and tablets that belong to the property
 rather than to a person. It can be the target of a doorbell ring, but never
 of a push notification, so each kind of profile gets its own entity: a
 notify entity for a person, an event entity for a device group.

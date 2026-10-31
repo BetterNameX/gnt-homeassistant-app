@@ -12,16 +12,12 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    API_VERSION,
-    INTEGRATION_VERSION,
-    CONF_CACHED_PROFILES,
     CONF_PUSH_NOTIFICATION_TOKEN,
     DOMAIN,
+    INTEGRATION_VERSION,
     SERVICE_DEVICE_IDENTIFIER,
     SIGNAL_CONFIG_UPDATED,
-    SIGNAL_PROFILES_UPDATED,
 )
-from .profiles import device_groups, people
 
 
 async def async_setup_entry(
@@ -42,11 +38,11 @@ class BNGntStatusBinarySensor(BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_visible_default = False
+    _attr_unique_id = "status"
 
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialise the sensor."""
         self._entry = entry
-        self._attr_unique_id = "status"
 
     @property
     def is_on(self) -> bool:
@@ -55,18 +51,11 @@ class BNGntStatusBinarySensor(BinarySensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        """Return API version, push notification status, people and device groups."""
+        """Return what released apps read: the version, and whether push is set up."""
         token = self._entry.data.get(CONF_PUSH_NOTIFICATION_TOKEN)
-        push_configured = isinstance(token, str) and len(token) > 0
-
-        profiles: list[dict] = self._entry.data.get(CONF_CACHED_PROFILES, [])
-
         return {
             "integration_version": INTEGRATION_VERSION,
-            "api_version": API_VERSION,
-            "push_notifications_configured": push_configured,
-            "people": [p["label"] for p in people(profiles)],
-            "device_groups": [p["label"] for p in device_groups(profiles)],
+            "push_notifications_configured": isinstance(token, str) and len(token) > 0,
         }
 
     @property
@@ -80,15 +69,10 @@ class BNGntStatusBinarySensor(BinarySensorEntity):
         )
 
     async def async_added_to_hass(self) -> None:
-        """Register dispatcher listeners to update state when config or profiles change."""
+        """Update the attributes when the push token changes."""
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, SIGNAL_CONFIG_UPDATED, self.async_write_ha_state
-            )
-        )
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass, SIGNAL_PROFILES_UPDATED, self.async_write_ha_state
             )
         )
 

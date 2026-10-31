@@ -26,14 +26,17 @@ from homeassistant.helpers.service import async_register_admin_service
 
 from .admin_code import (
     SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE_SCHEMA,
-    SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET_SCHEMA,
     BNGntAdminCodeStore,
     async_remove_store as async_remove_admin_code_store,
     handle_managed_device_admin_code_configure,
-    handle_managed_device_admin_code_get,
     ws_report_managed_device_admin_code,
 )
 from .api_client import fetch_profiles, send_notification
+from .device_api import BNGntDeviceAuth, async_register_commands as async_register_v2_commands
+from .device_control_backend_keys import (
+    BNGntSigningKeys,
+    async_remove_store as async_remove_signing_keys_store,
+)
 from .const import (
     CONF_CACHED_DEEP_LINK_DESTINATIONS,
     CONF_CACHED_PROFILES,
@@ -46,12 +49,14 @@ from .const import (
     SIGNAL_CONFIG_UPDATED,
     SIGNAL_PROFILES_UPDATED,
 )
+from .encryption_key import (
+    BNGntEncryptionKeyStore,
+    async_remove_store as async_remove_encryption_key_store,
+)
 from .event import BNGntDeviceGroupEventEntity
 from .managed_devices import (
     BNGntManagedDeviceError,
     BNGntManagedDeviceRegistry,
-    SERVICE_DELETE_MANAGED_DEVICE_SCHEMA,
-    SERVICE_LIST_MANAGED_DEVICES_SCHEMA,
     SERVICE_MANAGED_DEVICE_APP_LOCK_SCHEMA,
     SERVICE_MANAGED_DEVICE_APP_RELOAD_SCHEMA,
     SERVICE_MANAGED_DEVICE_APP_UNLOCK_SCHEMA,
@@ -63,12 +68,9 @@ from .managed_devices import (
     SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE_SCHEMA,
     SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE_SCHEMA,
     SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA,
-    SERVICE_REPLACE_MANAGED_DEVICE_SCHEMA,
     SERVICE_UNREGISTER_MANAGED_DEVICE_SCHEMA,
     SERVICE_UPDATE_MANAGED_DEVICE_STATE_SCHEMA,
     async_get_ha_device,
-    handle_delete_managed_device,
-    handle_list_managed_devices,
     handle_managed_device_app_lock,
     handle_managed_device_app_reload,
     handle_managed_device_app_unlock,
@@ -80,7 +82,6 @@ from .managed_devices import (
     handle_managed_device_screensaver_configure,
     handle_managed_device_wake_on_approach_configure,
     handle_register_managed_device,
-    handle_replace_managed_device,
     handle_unregister_managed_device,
     handle_update_managed_device_state,
 )
@@ -91,13 +92,16 @@ from .profiles import (
     people,
     profiles_predate_device_groups,
 )
+from .registrations import (
+    BNGntRegistrationStore,
+    async_remove_store as async_remove_registration_store,
+)
 from .settings_backup import (
     BNGntSettingsBackupStore,
     async_remove_store as async_remove_settings_backup_store,
-    ws_complete_managed_device_settings_restore,
-    ws_get_managed_device_settings_restore,
     ws_report_managed_device_settings_backup,
 )
+from .v1_rules import raise_if_v1_refused
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,9 +129,6 @@ SERVICE_REGISTER_MANAGED_DEVICE = "register_managed_device"
 SERVICE_UNREGISTER_MANAGED_DEVICE = "unregister_managed_device"
 SERVICE_MANAGED_DEVICE_COMMAND_RESPONSE = "managed_device_command_response"
 SERVICE_UPDATE_MANAGED_DEVICE_STATE = "update_managed_device_state"
-SERVICE_LIST_MANAGED_DEVICES = "list_managed_devices"
-SERVICE_REPLACE_MANAGED_DEVICE = "replace_managed_device"
-SERVICE_DELETE_MANAGED_DEVICE = "delete_managed_device"
 SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE = "managed_device_screensaver_configure"
 SERVICE_MANAGED_DEVICE_SCREEN_CONFIGURE = "managed_device_screen_configure"
 SERVICE_MANAGED_DEVICE_SCREEN_WAKE_UP = "managed_device_screen_wake_up"
@@ -142,7 +143,6 @@ SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE = (
     "managed_device_wake_on_approach_configure"
 )
 SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE = "managed_device_admin_code_configure"
-SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET = "managed_device_admin_code_get"
 
 STATIC_SERVICES = [
     SERVICE_SETUP_PUSH_NOTIFICATIONS,
@@ -157,9 +157,6 @@ STATIC_SERVICES = [
     SERVICE_UNREGISTER_MANAGED_DEVICE,
     SERVICE_MANAGED_DEVICE_COMMAND_RESPONSE,
     SERVICE_UPDATE_MANAGED_DEVICE_STATE,
-    SERVICE_LIST_MANAGED_DEVICES,
-    SERVICE_REPLACE_MANAGED_DEVICE,
-    SERVICE_DELETE_MANAGED_DEVICE,
     SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE,
     SERVICE_MANAGED_DEVICE_SCREEN_CONFIGURE,
     SERVICE_MANAGED_DEVICE_SCREEN_WAKE_UP,
@@ -170,7 +167,6 @@ STATIC_SERVICES = [
     SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE,
     SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE,
     SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE,
-    SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET,
 ]
 
 # The doorbell ring sound plays a configurable number of times (1-5, default 1).
@@ -359,6 +355,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # --- Device registration (v2) ---
+
+    registrations = BNGntRegistrationStore(hass)
+    await registrations.async_load()
+    signing_keys = BNGntSigningKeys(hass, entry)
+    await signing_keys.async_load()
+    encryption_key = BNGntEncryptionKeyStore(hass)
+    await encryption_key.async_load()
+
+    device_auth = BNGntDeviceAuth(hass, entry, signing_keys, registrations, encryption_key)
+    hass.data[DOMAIN]["device_auth"] = device_auth
+    device_auth.start()
+
     # --- Managed device registry ---
 
     # Loaded first, so that they drop the entries of records that are gone
@@ -419,6 +428,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_dispatcher_send(hass, SIGNAL_PROFILES_UPDATED)
         async_dispatcher_send(hass, SIGNAL_CONFIG_UPDATED)
 
+    # zendo/v2/set_up refreshes them the same way.
+    hass.data[DOMAIN]["refresh_profiles"] = _refresh_and_register
+
     async def _refresh_cached_profiles(token: str) -> None:
         """Refresh the profile cache, logging rather than raising on failure."""
         try:
@@ -432,7 +444,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # --- setup_push_notifications ---
 
     async def handle_setup_push_notifications(call: ServiceCall) -> None:
-        """Store the JWT token and refresh profiles."""
+        """Store the JWT token and refresh profiles.
+
+        Only until Home Assistant is linked to a site: from then on, a push
+        token is stored with zendo/v2/set_up.
+        """
+        raise_if_v1_refused(
+            hass, SERVICE_SETUP_PUSH_NOTIFICATIONS, admin=True, push_setup=True
+        )
         token = call.data["token"]
 
         entries = hass.config_entries.async_entries(DOMAIN)
@@ -528,6 +547,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_set_deep_link_destinations(call: ServiceCall) -> None:
         """Store the list of deep link destinations from the mobile app."""
+        raise_if_v1_refused(hass, SERVICE_SET_DEEP_LINK_DESTINATIONS, admin=True)
         raw = call.data["destinations"]
         try:
             destinations = json.loads(raw)
@@ -556,6 +576,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_notify_site_config_manifest_update(call: ServiceCall) -> None:
         """Broadcast a site config manifest update event to connected clients."""
+        raise_if_v1_refused(
+            hass, SERVICE_NOTIFY_SITE_CONFIG_MANIFEST_UPDATE, admin=True
+        )
         payload = call.data.get("payload")
         hass.bus.async_fire("bngnt_site_config_manifest_updated", {"payload": payload})
 
@@ -681,6 +704,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         actions can be introduced without releasing the companion apps. The app
         types the known set (silence/answer/decline) and ignores anything else.
         """
+        raise_if_v1_refused(hass, SERVICE_DOORBELL_ACTION)
         event_id: str = call.data["event_id"]
         action: str | None = call.data.get("action")
 
@@ -693,14 +717,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # --- Register all services ---
 
     service_map = {
-        SERVICE_SETUP_PUSH_NOTIFICATIONS: (
-            handle_setup_push_notifications,
-            SERVICE_SETUP_PUSH_NOTIFICATIONS_SCHEMA,
-        ),
-        SERVICE_REFRESH_PROFILES: (
-            handle_refresh_profiles,
-            SERVICE_REFRESH_PROFILES_SCHEMA,
-        ),
         SERVICE_SEND_NOTIFICATION: (
             handle_send_notification,
             SERVICE_SEND_NOTIFICATION_SCHEMA,
@@ -747,18 +763,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             partial(handle_managed_device_audio_configure, hass),
             SERVICE_MANAGED_DEVICE_AUDIO_CONFIGURE_SCHEMA,
         ),
-        SERVICE_MANAGED_DEVICE_APP_RELOAD: (
-            partial(handle_managed_device_app_reload, hass),
-            SERVICE_MANAGED_DEVICE_APP_RELOAD_SCHEMA,
-        ),
-        SERVICE_MANAGED_DEVICE_APP_LOCK: (
-            partial(handle_managed_device_app_lock, hass),
-            SERVICE_MANAGED_DEVICE_APP_LOCK_SCHEMA,
-        ),
-        SERVICE_MANAGED_DEVICE_APP_UNLOCK: (
-            partial(handle_managed_device_app_unlock, hass),
-            SERVICE_MANAGED_DEVICE_APP_UNLOCK_SCHEMA,
-        ),
         SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE: (
             partial(handle_managed_device_auto_brightness_configure, hass),
             SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE_SCHEMA,
@@ -795,21 +799,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SERVICE_UPDATE_MANAGED_DEVICE_STATE_SCHEMA,
             SupportsResponse.OPTIONAL,
         ),
-        SERVICE_LIST_MANAGED_DEVICES: (
-            partial(handle_list_managed_devices, hass),
-            SERVICE_LIST_MANAGED_DEVICES_SCHEMA,
-            SupportsResponse.ONLY,
-        ),
-        SERVICE_REPLACE_MANAGED_DEVICE: (
-            partial(handle_replace_managed_device, hass),
-            SERVICE_REPLACE_MANAGED_DEVICE_SCHEMA,
-            SupportsResponse.ONLY,
-        ),
-        SERVICE_DELETE_MANAGED_DEVICE: (
-            partial(handle_delete_managed_device, hass),
-            SERVICE_DELETE_MANAGED_DEVICE_SCHEMA,
-            SupportsResponse.OPTIONAL,
-        ),
     }
 
     for name, (handler, schema, response_mode) in responsive_services.items():
@@ -819,18 +808,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 supports_response=response_mode,
             )
 
-    # Only an administrator can read or change an admin code. A call with no
-    # user, such as an automation's, is allowed.
+    # Only an administrator can store a push token, refresh the people and device
+    # groups, change an admin code, reload the app, or lock and unlock it. A call
+    # with no user, such as an automation's, is allowed.
     admin_services = {
+        SERVICE_SETUP_PUSH_NOTIFICATIONS: (
+            handle_setup_push_notifications,
+            SERVICE_SETUP_PUSH_NOTIFICATIONS_SCHEMA,
+            SupportsResponse.NONE,
+        ),
+        SERVICE_REFRESH_PROFILES: (
+            handle_refresh_profiles,
+            SERVICE_REFRESH_PROFILES_SCHEMA,
+            SupportsResponse.NONE,
+        ),
+        SERVICE_MANAGED_DEVICE_APP_RELOAD: (
+            partial(handle_managed_device_app_reload, hass),
+            SERVICE_MANAGED_DEVICE_APP_RELOAD_SCHEMA,
+            SupportsResponse.NONE,
+        ),
+        SERVICE_MANAGED_DEVICE_APP_LOCK: (
+            partial(handle_managed_device_app_lock, hass),
+            SERVICE_MANAGED_DEVICE_APP_LOCK_SCHEMA,
+            SupportsResponse.NONE,
+        ),
+        SERVICE_MANAGED_DEVICE_APP_UNLOCK: (
+            partial(handle_managed_device_app_unlock, hass),
+            SERVICE_MANAGED_DEVICE_APP_UNLOCK_SCHEMA,
+            SupportsResponse.NONE,
+        ),
         SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE: (
             partial(handle_managed_device_admin_code_configure, hass),
             SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE_SCHEMA,
             SupportsResponse.NONE,
-        ),
-        SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET: (
-            partial(handle_managed_device_admin_code_get, hass),
-            SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET_SCHEMA,
-            SupportsResponse.ONLY,
         ),
     }
 
@@ -847,9 +857,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     websocket_api.async_register_command(
         hass, ws_report_managed_device_settings_backup
     )
-    websocket_api.async_register_command(hass, ws_get_managed_device_settings_restore)
-    websocket_api.async_register_command(
-        hass, ws_complete_managed_device_settings_restore
+    async_register_v2_commands(hass)
+
+    # --- The site link, from a push token an older version stored ---
+
+    entry.async_create_background_task(
+        hass, device_auth.async_link_from_stored_push_token(), "bngnt_link_to_site"
     )
 
     # --- Profiles cached before device groups ---
@@ -913,8 +926,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         registry = hass.data[DOMAIN].pop("managed_device_registry", None)
         if registry:
             registry.stop()
-            await registry.admin_codes.async_flush()
-            await registry.settings_backups.async_flush()
+            await registry.admin_codes.async_close()
+            await registry.settings_backups.async_close()
+
+        device_auth: BNGntDeviceAuth | None = hass.data[DOMAIN].pop("device_auth", None)
+        if device_auth:
+            device_auth.stop()
+            await device_auth.registrations.async_close()
+            await device_auth.encryption_key.async_close()
 
         for name in STATIC_SERVICES:
             hass.services.async_remove(DOMAIN, name)
@@ -927,11 +946,38 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop("async_add_managed_device_sensors", None)
         hass.data[DOMAIN].pop("async_add_managed_device_binary_sensors", None)
         hass.data[DOMAIN].pop("managed_device_entities", None)
+        hass.data[DOMAIN].pop("refresh_profiles", None)
 
     return unload_ok
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Remove the admin codes and settings backups kept for the entry."""
+    """Remove the stores kept for the entry.
+
+    The admin codes, the settings backups and their restores, the device
+    registrations with the tombstones and the admin-registered flag, the signing
+    keys and the site config encryption key's copy. Home Assistant removes the
+    rest with the entry: its data, which holds the link, the push token and the
+    managed device records, and its devices and entities. Added again, it's
+    unlinked until an admin links it, and every device registers again. See
+    docs/managed-devices.md, "Moving to Another Property or Starting Over".
+    """
+    # Still open when the unload failed: closed first, so that none of them
+    # writes its file again.
+    domain_data = hass.data.get(DOMAIN, {})
+    registry: BNGntManagedDeviceRegistry | None = domain_data.get(
+        "managed_device_registry"
+    )
+    if registry is not None:
+        await registry.admin_codes.async_close()
+        await registry.settings_backups.async_close()
+    device_auth: BNGntDeviceAuth | None = domain_data.get("device_auth")
+    if device_auth is not None:
+        await device_auth.registrations.async_close()
+        await device_auth.encryption_key.async_close()
+
     await async_remove_admin_code_store(hass)
     await async_remove_settings_backup_store(hass)
+    await async_remove_registration_store(hass)
+    await async_remove_signing_keys_store(hass)
+    await async_remove_encryption_key_store(hass)

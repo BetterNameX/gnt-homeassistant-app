@@ -15,17 +15,24 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout
 
+from .device_auth import parse_txt_data
+
 _LOGGER = logging.getLogger(__name__)
 
 DNS_BASE_DOMAIN = "gnt.betterna.me"
 
-# use DoH to avoid tampering of responses in transit (MITM)
+TXT_RECORD_TYPE = 16
+
 DOH_ENDPOINTS = [
     "https://cloudflare-dns.com/dns-query",
     "https://dns.google/resolve",
 ]
 
 REQUEST_TIMEOUT = ClientTimeout(total=5)
+
+
+class BNGntDnsReadError(RuntimeError):
+    """A TXT record can't be read, and no earlier answer is cached."""
 
 
 @dataclass
@@ -94,7 +101,65 @@ async def query_dns_txt(
         _LOGGER.debug("[DNS %s] Using stale cached data", hostname)
         return stale_data
 
-    raise RuntimeError(f"Cannot fetch DNS data for {hostname}")
+    raise BNGntDnsReadError(f"Cannot fetch DNS data for {hostname}")
+
+
+async def resolve_txt_validated(session: ClientSession, hostname: str) -> str | None:
+    """Return a TXT record's text from the first DNSSEC-validated answer.
+
+    Tries each DoH endpoint in turn, and takes an answer only when the resolver
+    validated it (``AD`` is true). An answer that can't be read counts as a
+    failed read, and the next endpoint is tried. Returns None when none did.
+    Nothing is cached here: the caller keeps what it needs.
+    """
+    fqdn = f"{hostname}.{DNS_BASE_DOMAIN}"
+
+    for endpoint in DOH_ENDPOINTS:
+        try:
+            result = await _query_txt(session, endpoint, fqdn)
+            if result.get("AD") is not True:
+                _LOGGER.warning(
+                    "[DNS %s] %s didn't return a validated answer", hostname, endpoint
+                )
+                continue
+            text = _first_txt(result)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "[DNS %s] Failed to resolve via %s", hostname, endpoint, exc_info=True
+            )
+            continue
+
+        if text is not None:
+            return text
+
+    return None
+
+
+async def _query_txt(
+    session: ClientSession,
+    endpoint: str,
+    fqdn: str,
+) -> dict[str, Any]:
+    """Return a DoH JSON endpoint's answer for a TXT query."""
+    params = {"name": fqdn, "type": "TXT"}
+    headers = {"Accept": "application/dns-json"}
+
+    async with session.get(
+        endpoint, params=params, headers=headers, timeout=REQUEST_TIMEOUT
+    ) as resp:
+        resp.raise_for_status()
+        return await resp.json(content_type=None)
+
+
+def _first_txt(result: dict[str, Any]) -> str | None:
+    """Return the text of the first TXT answer, its strings joined."""
+    for answer in result.get("Answer", []):
+        if answer.get("type", TXT_RECORD_TYPE) != TXT_RECORD_TYPE:
+            continue
+        text = parse_txt_data(answer.get("data", ""))
+        if text:
+            return text
+    return None
 
 
 async def _resolve_txt(
@@ -103,22 +168,5 @@ async def _resolve_txt(
     fqdn: str,
 ) -> dict[str, Any] | None:
     """Resolve a single TXT record via a DoH JSON endpoint."""
-    params = {"name": fqdn, "type": "TXT"}
-    headers = {"Accept": "application/dns-json"}
-
-    async with session.get(
-        endpoint, params=params, headers=headers, timeout=REQUEST_TIMEOUT
-    ) as resp:
-        resp.raise_for_status()
-        result = await resp.json(content_type=None)
-
-    answers = result.get("Answer", [])
-
-    for answer in answers:
-        txt_data = answer.get("data", "")
-        txt_data = txt_data.strip('"')
-
-        if txt_data:
-            return json.loads(txt_data)
-
-    return None
+    text = _first_txt(await _query_txt(session, endpoint, fqdn))
+    return json.loads(text) if text is not None else None

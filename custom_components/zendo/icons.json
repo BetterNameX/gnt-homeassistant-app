@@ -56,15 +56,6 @@
     "update_managed_device_state": {
       "service": "mdi:update"
     },
-    "list_managed_devices": {
-      "service": "mdi:format-list-bulleted"
-    },
-    "replace_managed_device": {
-      "service": "mdi:swap-horizontal"
-    },
-    "delete_managed_device": {
-      "service": "mdi:delete"
-    },
     "managed_device_screensaver_configure": {
       "service": "mdi:weather-night"
     },
@@ -94,9 +85,6 @@
     },
     "managed_device_admin_code_configure": {
       "service": "mdi:shield-key"
-    },
-    "managed_device_admin_code_get": {
-      "service": "mdi:shield-search"
     }
   }
 }

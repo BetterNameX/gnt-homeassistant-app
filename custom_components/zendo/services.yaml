@@ -18,7 +18,7 @@ refresh_profiles:
   description: >-
     Fetch the people and device groups from the Zendo backend and create their
     entities: a notification entity for each person, and an event entity for
-    each device group.
+    each device group. Only Home Assistant administrators can run this action.
 
 send_notification:
   name: Send notification
@@ -234,31 +234,6 @@ register_managed_device:
       required: true
       selector:
         text:
-    device_model_slug:
-      name: Device model slug
-      description: >-
-        Optional. The ID of the device's model in the Zendo app's wall panel
-        catalogue. Only a wall panel has one. Can be null.
-      required: false
-      selector:
-        text:
-    device_launcher_id:
-      name: Device launcher ID
-      description: >-
-        Optional. Zendo Launcher's ID for the wall panel it runs on. Only a
-        wall panel with Zendo Launcher has one. Can be null.
-      required: false
-      selector:
-        text:
-    device_serial_number:
-      name: Device serial number
-      description: >-
-        Optional. The wall panel's hardware serial number, as Zendo Launcher
-        reports it. It also sets the Home Assistant device's serial number.
-        Can be null.
-      required: false
-      selector:
-        text:
     device_os:
       name: Device OS
       description: Required. The device operating system (e.g. "ios", "android").
@@ -361,58 +336,6 @@ update_managed_device_state:
       name: State
       description: >-
         Required. JSON-stringified device state object.
-      required: true
-      selector:
-        text:
-
-list_managed_devices:
-  name: List managed devices [Internal]
-  description: >-
-    List the managed devices, with the Zendo device attached to each and
-    whether it's online. This is an internal service called by the Zendo app
-    and should not be called manually.
-
-replace_managed_device:
-  name: Replace managed device [Internal]
-  description: >-
-    Attach the replacement, the Zendo device whose profile ID and device ID are
-    given, to another managed device, so automations that control that managed
-    device control the replacement instead. The request can come from any
-    device, such as an admin's phone. The replacement's own managed device, the
-    one it leaves behind, is removed. This is an internal service called by the
-    Zendo app and should not be called manually.
-  fields:
-    profile_id:
-      name: Profile ID
-      description: >-
-        Required. The profile ID of the replacement, the device that takes the
-        managed device's place.
-      required: true
-      selector:
-        text:
-    device_id:
-      name: Device ID
-      description: Required. The device ID of the replacement.
-      required: true
-      selector:
-        text:
-    managed_device_id:
-      name: Managed device ID
-      description: Required. The managed device the replacement takes over.
-      required: true
-      selector:
-        text:
-
-delete_managed_device:
-  name: Delete managed device [Internal]
-  description: >-
-    Remove an offline managed device and its entities. A managed device that's
-    online can't be removed. This is an internal service called by the Zendo
-    app and should not be called manually.
-  fields:
-    managed_device_id:
-      name: Managed device ID
-      description: Required. The managed device to remove.
       required: true
       selector:
         text:
@@ -552,7 +475,8 @@ managed_device_audio_configure:
 managed_device_app_reload:
   name: Reload device app (Kiosk)
   description: >-
-    Reload the Zendo app on a device.
+    Reload the Zendo app on a device. Only Home Assistant administrators can
+    run this action.
   fields:
     device:
       name: Device
@@ -568,7 +492,9 @@ managed_device_app_lock:
   description: >-
     Lock a Zendo device with a PIN. Device will require the PIN to
     unlock locally. Device can also be unlocked remotely using the
-    managed_device_app_unlock service.
+    managed_device_app_unlock service. The device needs a current version of
+    the Zendo app. Only Home Assistant administrators can run this action, and
+    a PIN set here shows in recorded events and traces.
   fields:
     device:
       name: Device
@@ -598,7 +524,7 @@ managed_device_app_unlock:
   name: Unlock device (Kiosk)
   description: >-
     Remotely unlock a Zendo device. No PIN is needed for remote
-    unlock.
+    unlock. Only Home Assistant administrators can run this action.
   fields:
     device:
       name: Device
@@ -687,9 +613,9 @@ managed_device_admin_code_configure:
   name: Configure device admin code (Kiosk)
   description: >-
     Set or remove the admin code on Zendo devices with Always-On Display
-    (Kiosk) on. The devices have to be online. Only Home Assistant
-    administrators can run this action, and a code set here shows in
-    recorded events and traces.
+    (Kiosk) on. The devices have to be online, with a current version of the
+    Zendo app. Only Home Assistant administrators can run this action, and a
+    code set here shows in recorded events and traces.
   fields:
     device:
       name: Device
@@ -715,19 +641,3 @@ managed_device_admin_code_configure:
       required: false
       selector:
         boolean:
-
-managed_device_admin_code_get:
-  name: Get device admin code (Kiosk)
-  description: >-
-    Get the admin code of a Zendo device with Always-On Display (Kiosk) on,
-    even while it's offline. Responds with admin_code, status (set, not_set
-    or unknown) and reported_at. Only Home Assistant administrators can run
-    this action.
-  fields:
-    device:
-      name: Device
-      description: Required. One Zendo device.
-      required: true
-      selector:
-        device:
-          integration: zendo

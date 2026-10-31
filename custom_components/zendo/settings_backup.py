@@ -6,10 +6,12 @@ integration never reads. A replace leaves a restore on the record taken over:
 a snapshot of that record's latest backup and admin code status and code,
 which the new device fetches, applies and completes. See docs/managed-devices.md, "Settings Backup".
 
+The v1 report command is here. From 2.0.0 the restore is fetched and completed
+only with the ``zendo/v2/`` commands in ``device_api.py``.
+
 None of it may reach a log line, an error message, an entity, an attribute, a
-state, an event or ``_serialize_managed_device``: a backup is the app's, and a
-restore carries an admin code. Validation that fails on a backup is done in
-the handler with a fixed message, as in ``admin_code.py``.
+state, an event or ``_serialize_managed_device``. Validation that fails on a
+backup is done in the handler with a fixed message, as in ``admin_code.py``.
 """
 
 from __future__ import annotations
@@ -36,15 +38,12 @@ from .admin_code import (
 )
 from .const import DOMAIN
 from .managed_devices import BNGntManagedDeviceRegistry
+from .v1_rules import V1_REFUSED_RESULT, is_v1_refused
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.managed_device_settings_backups"
 
 WS_TYPE_REPORT_SETTINGS_BACKUP = f"{DOMAIN}/report_managed_device_settings_backup"
-WS_TYPE_GET_SETTINGS_RESTORE = f"{DOMAIN}/get_managed_device_settings_restore"
-WS_TYPE_COMPLETE_SETTINGS_RESTORE = (
-    f"{DOMAIN}/complete_managed_device_settings_restore"
-)
 
 # The largest backup taken, in bytes of its compact JSON in UTF-8. The Homey
 # app and the Zendo app use the same cap, measured the same way, so keep all
@@ -189,6 +188,7 @@ class BNGntSettingsBackupStore:
         )
         self._entries: dict[str, BNGntSettingsBackupEntry] = {}
         self._dirty = False
+        self._closed = False
 
     async def async_load(self, managed_device_ids: Iterable[str]) -> None:
         """Load the entries, dropping any whose record is gone."""
@@ -209,12 +209,14 @@ class BNGntSettingsBackupStore:
         if changed:
             self._schedule_save()
 
-    async def async_flush(self) -> None:
-        """Write a pending change now.
+    async def async_close(self) -> None:
+        """Write a pending change now, and take no more.
 
-        Called on unload, so that a delayed write can't land after
-        ``async_remove_store`` has removed the file.
+        Called on unload, so that no write, from a call still under way or at
+        Home Assistant's final write, can land after ``async_remove_store`` has
+        removed the file, or over the one the next setup loads.
         """
+        self._closed = True
         if self._dirty:
             await self._store.async_save(self._data_to_save())
 
@@ -327,6 +329,8 @@ class BNGntSettingsBackupStore:
 
     @callback
     def _schedule_save(self) -> None:
+        if self._closed:
+            return
         self._dirty = True
         self._store.async_delay_save(self._data_to_save)
 
@@ -342,14 +346,11 @@ async def async_remove_store(hass: HomeAssistant) -> None:
 
 
 # ---------------------------------------------------------------------------
-# WebSocket commands -- device-facing (called by the app)
+# WebSocket command -- device-facing (called by the app)
 #
-# Commands rather than services: every service call fires a ``call_service``
-# event with its data, which the recorder keeps, so a service would record
-# each backup a device reports. The restore's answer carries an admin code,
-# and an automation or script that called a service would keep its response
-# in its trace. Not admin-only, like update_managed_device_state, since the
-# app may sign in as a user who isn't an administrator.
+# A command, never a service, so a report fires no ``call_service`` event. Not
+# admin-only, like update_managed_device_state, since the app may sign in as a
+# user who isn't an administrator.
 #
 # Never log a message or an answer here.
 # ---------------------------------------------------------------------------
@@ -377,14 +378,25 @@ def _registry_or_error(
     return registry
 
 
+def _refused_as_v1(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> bool:
+    """Answer and return True when the v1 command may no longer be used."""
+    if not is_v1_refused(hass, msg["type"], (msg["profile_id"], msg["device_id"])):
+        return False
+    connection.send_result(msg["id"], dict(V1_REFUSED_RESULT))
+    return True
+
+
 @websocket_api.websocket_command(
     vol.All(
         vol.Schema(
             {
                 vol.Required("type"): WS_TYPE_REPORT_SETTINGS_BACKUP,
                 **_DEVICE_IDS,
-                # Any value, checked in the handler: a schema error would put
-                # the value in the error and the log.
+                # Any value, checked in the handler with a fixed message.
                 vol.Required("settings_backup"): object,
             },
             extra=vol.REMOVE_EXTRA,
@@ -404,7 +416,7 @@ def ws_report_managed_device_settings_backup(
     nothing else on the record, and fires no event.
     """
     registry = _registry_or_error(hass, connection, msg)
-    if registry is None:
+    if registry is None or _refused_as_v1(hass, connection, msg):
         return
 
     settings_backup = msg["settings_backup"]
@@ -416,88 +428,65 @@ def ws_report_managed_device_settings_backup(
         )
         return
 
-    key = registry.find_key(msg["profile_id"], msg["device_id"])
-    if key is not None:
-        registry.settings_backups.report(key, settings_backup)
-
-    connection.send_result(msg["id"], {"success": True, "registered": key is not None})
-
-
-@websocket_api.websocket_command(
-    vol.All(
-        vol.Schema(
-            {vol.Required("type"): WS_TYPE_GET_SETTINGS_RESTORE, **_DEVICE_IDS},
-            extra=vol.REMOVE_EXTRA,
-        )
-    )
-)
-@callback
-def ws_get_managed_device_settings_restore(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Return the restore pending on the device's record, or null for none."""
-    registry = _registry_or_error(hass, connection, msg)
-    if registry is None:
-        return
-
-    key = registry.find_key(msg["profile_id"], msg["device_id"])
-    restore = registry.settings_backups.restore_for(key) if key is not None else None
-
     connection.send_result(
         msg["id"],
-        {
-            "success": True,
-            "registered": key is not None,
-            "restore": (
-                None
-                if restore is None
-                else {
-                    "restore_id": restore["restore_id"],
-                    "previous_device_name": restore["previous_device_name"],
-                    "settings_backup": restore["settings_backup"],
-                    "admin_code_status": restore["admin_code_status"],
-                    "admin_code": restore["admin_code"],
-                }
-            ),
-        },
+        report_settings_backup(
+            registry, msg["profile_id"], msg["device_id"], settings_backup
+        ),
     )
 
 
-@websocket_api.websocket_command(
-    vol.All(
-        vol.Schema(
-            {
-                vol.Required("type"): WS_TYPE_COMPLETE_SETTINGS_RESTORE,
-                **_DEVICE_IDS,
-                vol.Required("restore_id"): vol.All(cv.string, vol.Length(min=1)),
-            },
-            extra=vol.REMOVE_EXTRA,
-        )
-    )
-)
-@callback
-def ws_complete_managed_device_settings_restore(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Drop the record's restore once the device has applied it.
+# Each takes the device's ids from the caller: the command's own fields for an
+# older app (v1), or a device's registration for the zendo/v2/ commands in
+# device_api.py. settings_restore and complete_settings_restore are v2 only.
+
+def report_settings_backup(
+    registry: BNGntManagedDeviceRegistry,
+    profile_id: str,
+    device_id: str,
+    settings_backup: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep a checked backup for the device's record, if it has one."""
+    key = registry.find_key(profile_id, device_id)
+    if key is not None:
+        registry.settings_backups.report(key, settings_backup)
+    return {"success": True, "registered": key is not None}
+
+
+def settings_restore(
+    registry: BNGntManagedDeviceRegistry, profile_id: str, device_id: str
+) -> dict[str, Any]:
+    """Return the restore pending on the device's record, or null for none."""
+    key = registry.find_key(profile_id, device_id)
+    restore = registry.settings_backups.restore_for(key) if key is not None else None
+    return {
+        "success": True,
+        "registered": key is not None,
+        "restore": (
+            None
+            if restore is None
+            else {
+                "restore_id": restore["restore_id"],
+                "previous_device_name": restore["previous_device_name"],
+                "settings_backup": restore["settings_backup"],
+                "admin_code_status": restore["admin_code_status"],
+                "admin_code": restore["admin_code"],
+            }
+        ),
+    }
+
+
+def complete_settings_restore(
+    registry: BNGntManagedDeviceRegistry,
+    profile_id: str,
+    device_id: str,
+    restore_id: str,
+) -> dict[str, Any]:
+    """Drop the device's record's restore if it's ``restore_id``.
 
     ``completed: false`` when the record's restore isn't ``restore_id``: one
     already completed, or an older one a second replace has replaced.
     """
-    registry = _registry_or_error(hass, connection, msg)
-    if registry is None:
-        return
-
-    key = registry.find_key(msg["profile_id"], msg["device_id"])
-    completed = key is not None and registry.settings_backups.complete(
-        key, msg["restore_id"]
-    )
-
-    connection.send_result(
-        msg["id"],
-        {"success": True, "registered": key is not None, "completed": completed},
-    )
+    key = registry.find_key(profile_id, device_id)
+    completed = key is not None and registry.settings_backups.complete(key, restore_id)
+    return {"success": True, "registered": key is not None, "completed": completed}

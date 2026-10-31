@@ -4,8 +4,8 @@ Identity: the integration owns each managed device. Its record is keyed by
 an opaque managed device ID (``key``), which is also its HA device
 identifier ``(DOMAIN, key)`` and what automations point at. The app device
 currently attached to it is the record's ``profile_id`` + ``device_id``, and
-that pair can change: ``replace_managed_device`` attaches another device to
-the record. A key is never rebuilt from the attached ids, so never parse
+that pair can change: ``zendo/v2/replace_managed_device`` attaches another
+device to the record. A key is never rebuilt from the attached ids, so never parse
 one. See docs/managed-devices.md.
 
 Command/response flow (JSON-RPC 2.0 over the HA event bus):
@@ -24,6 +24,14 @@ Command/response flow (JSON-RPC 2.0 over the HA event bus):
    that ``id`` and resolves it, unblocking the original service call.
 6. If the device doesn't respond within ``COMMAND_TIMEOUT`` seconds, the
    future is cancelled and the service raises ``HomeAssistantError``.
+
+A device that has registered (``device_api.py``, from 2.0.0) gets its commands
+another way: in a command envelope sent to the ``zendo/v2/subscribe_events``
+subscriptions, never as a bus event, and it answers with the
+``zendo/v2/managed_device_command_response`` command. Either way, an answer
+counts only when it comes from the device the command went to. ``adminCode.set``
+and ``app.lock`` go only to a registered device: one that hasn't registered is
+sent nothing, and the command fails as needing a newer version of the app.
 
 Fan-out: when a higher-level caller needs to target multiple devices, it
 calls the service once per device. Each call gets its own ``id`` and
@@ -49,8 +57,8 @@ entity once a state update carries a value other than null for it, and keeps
 it from then on.
 
 Status events: ``bngnt_managed_device_updated`` carries a record exactly as
-``list_managed_devices`` lists it, admin code status included, and also fires
-when a device's admin code report changes that status.
+``zendo/v2/list_managed_devices`` lists it, admin code status included, and
+also fires when a device's admin code report changes that status.
 ``bngnt_managed_device_removed`` carries the ``managed_device_id`` of a record
 that's gone. The app listens to them while it shows device status.
 ``bngnt_managed_device_replaced`` carries the ``managed_device_id`` of a
@@ -111,6 +119,8 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import CONF_MANAGED_DEVICES, DOMAIN, SERVICE_DEVICE_IDENTIFIER
+from .device_auth import CommandRefusal, command_refusal
+from .v1_rules import V1_REFUSED_RESULT, is_v1_refused, raise_if_v1_refused
 
 if TYPE_CHECKING:
     from .admin_code import BNGntAdminCodeStore
@@ -129,6 +139,14 @@ MANAGED_DEVICE_ID_MAX_LENGTH = 255
 ERROR_REPLACEMENT_NOT_REGISTERED = "replacement_not_registered"
 ERROR_TARGET_NOT_FOUND = "target_not_found"
 ERROR_TARGET_ONLINE = "target_online"
+# A command to the record's device that didn't take: it's offline, it didn't
+# answer in time or couldn't be sent, or it answered with a JSON-RPC error:
+# Method not found, Not supported, or any other.
+ERROR_TARGET_OFFLINE = "target_offline"
+ERROR_NO_ANSWER = "no_answer"
+ERROR_APP_UPDATE_REQUIRED = "app_update_required"
+ERROR_NOT_SUPPORTED = "not_supported"
+ERROR_COMMAND_FAILED = "command_failed"
 
 # Why a record is offline. A plain string on the wire, so a hub can add a
 # reason without an app release. The registry only writes these, and the app
@@ -140,6 +158,7 @@ OFFLINE_REASONS = (OFFLINE_REASON_TIMEOUT, OFFLINE_REASON_UNREGISTERED)
 OfflineReason = Literal["timeout", "unregistered"]
 
 # The app subscribes to these by name, and the Homey app emits the same ones.
+EVENT_MANAGED_DEVICE_COMMAND = "bngnt_managed_device_command"
 EVENT_MANAGED_DEVICE_UPDATED = "bngnt_managed_device_updated"
 EVENT_MANAGED_DEVICE_REMOVED = "bngnt_managed_device_removed"
 EVENT_MANAGED_DEVICE_REPLACED = "bngnt_managed_device_replaced"
@@ -340,23 +359,61 @@ def _launcher_value(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+# The device info a registration carries, besides the device's ids and a wall
+# panel's fields.
+_DEVICE_INFO_FIELDS = {
+    vol.Required("device_name"): vol.All(cv.string, vol.Length(min=1)),
+    vol.Required("device_brand"): vol.Any(None, cv.string),
+    vol.Required("device_type"): vol.All(cv.string, vol.Length(min=1)),
+    vol.Required("device_model_name"): vol.Any(None, cv.string),
+    vol.Required("device_os"): vol.All(cv.string, vol.Length(min=1)),
+    vol.Optional("device_os_version"): vol.Any(None, cv.string),
+    vol.Required("app_version"): vol.All(cv.string, vol.Length(min=1)),
+    vol.Optional("managed_device_id"): _managed_device_id_hint,
+}
+
+# A wall panel's fields of the device info. Only
+# zendo/v2/register_managed_device takes them.
+_PANEL_INFO_FIELDS = {
+    vol.Optional("device_model_slug"): _device_model_slug,
+    vol.Optional("device_launcher_id"): _launcher_value,
+    vol.Optional("device_serial_number"): _launcher_value,
+}
+
+PANEL_INFO_FIELD_NAMES = (
+    "device_model_slug",
+    "device_launcher_id",
+    "device_serial_number",
+)
+
+DEVICE_INFO_FIELD_NAMES = (
+    "device_name",
+    "device_brand",
+    "device_type",
+    "device_model_name",
+    "device_model_slug",
+    "device_launcher_id",
+    "device_serial_number",
+    "device_os",
+    "device_os_version",
+    "app_version",
+    "managed_device_id",
+)
+
+# REMOVE_EXTRA drops a wall panel's fields from an app that still sends them.
 SERVICE_REGISTER_MANAGED_DEVICE_SCHEMA = vol.Schema(
     {
         vol.Required("profile_id"): vol.All(cv.string, vol.Length(min=1)),
         vol.Required("device_id"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Required("device_name"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Required("device_brand"): vol.Any(None, cv.string),
-        vol.Required("device_type"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Required("device_model_name"): vol.Any(None, cv.string),
-        vol.Optional("device_model_slug"): _device_model_slug,
-        vol.Optional("device_launcher_id"): _launcher_value,
-        vol.Optional("device_serial_number"): _launcher_value,
-        vol.Required("device_os"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Optional("device_os_version"): vol.Any(None, cv.string),
-        vol.Required("app_version"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Optional("managed_device_id"): _managed_device_id_hint,
+        **_DEVICE_INFO_FIELDS,
     },
     extra=vol.REMOVE_EXTRA,
+)
+
+# For zendo/v2/register_managed_device: no ids, as a registered device's ids
+# are its registration's, and with a wall panel's fields.
+REGISTER_DEVICE_INFO_SCHEMA = vol.Schema(
+    {**_DEVICE_INFO_FIELDS, **_PANEL_INFO_FIELDS}, extra=vol.REMOVE_EXTRA
 )
 
 SERVICE_UNREGISTER_MANAGED_DEVICE_SCHEMA = vol.Schema(
@@ -381,24 +438,6 @@ SERVICE_UPDATE_MANAGED_DEVICE_STATE_SCHEMA = vol.Schema(
         vol.Required("profile_id"): vol.All(cv.string, vol.Length(min=1)),
         vol.Required("device_id"): vol.All(cv.string, vol.Length(min=1)),
         vol.Required("state"): vol.All(cv.string, vol.Length(min=1)),
-    },
-    extra=vol.REMOVE_EXTRA,
-)
-
-SERVICE_LIST_MANAGED_DEVICES_SCHEMA = vol.Schema({}, extra=vol.REMOVE_EXTRA)
-
-SERVICE_REPLACE_MANAGED_DEVICE_SCHEMA = vol.Schema(
-    {
-        vol.Required("profile_id"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Required("device_id"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Required("managed_device_id"): vol.All(cv.string, vol.Length(min=1)),
-    },
-    extra=vol.REMOVE_EXTRA,
-)
-
-SERVICE_DELETE_MANAGED_DEVICE_SCHEMA = vol.Schema(
-    {
-        vol.Required("managed_device_id"): vol.All(cv.string, vol.Length(min=1)),
     },
     extra=vol.REMOVE_EXTRA,
 )
@@ -510,10 +549,58 @@ class BNGntManagedDeviceCommandError(HomeAssistantError):
     def __init__(self, message: str, code: Any) -> None:
         super().__init__(f"Device returned error: {message}")
         self.code = code
+        self.device_message = message
 
 
 class BNGntManagedDeviceTimeoutError(HomeAssistantError):
     """A device didn't answer a command in time. It may still have run it."""
+
+
+class BNGntManagedDeviceUnloadedError(HomeAssistantError):
+    """The integration unloaded while waiting for a device's answer.
+
+    The device may still run the command.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Zendo stopped on Home Assistant before the device answered")
+
+
+class BNGntManagedDeviceOfflineError(HomeAssistantError):
+    """The device is offline, and nothing was sent."""
+
+    def __init__(self, device_name: str) -> None:
+        super().__init__(f"Device '{device_name}' is offline")
+
+
+class BNGntManagedDeviceAppUpdateRequiredError(HomeAssistantError):
+    """The device needs a newer version of the app for the command.
+
+    Either it answered Method not found, or the command is one that never goes
+    to a device that hasn't registered (``command_refusal``), and nothing was
+    sent.
+    """
+
+    def __init__(self, device_name: str) -> None:
+        super().__init__(
+            f"Device '{device_name}' needs a newer version of the Zendo app"
+        )
+
+
+class BNGntManagedDeviceNotLinkedError(HomeAssistantError):
+    """Home Assistant isn't linked to a site, and nothing was sent.
+
+    Raised for a command that goes only to a registered device. No device can
+    register until Home Assistant is linked, so this isn't about any one device:
+    a caller with several says it once, rather than for each.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Zendo isn't set up on Home Assistant yet. An admin needs to open the "
+            "Zendo app, go to Settings, then Property, then Zendo on Home "
+            "Assistant, and tap Set Up."
+        )
 
 
 def _build_model(device_brand: str | None, device_model_name: str | None) -> str | None:
@@ -593,7 +680,7 @@ def _serialize_managed_device(
     device: BNGntManagedDeviceRecord,
     admin_code_status: str,
 ) -> dict[str, Any]:
-    """Return a record as ``list_managed_devices`` lists it.
+    """Return a record as ``zendo/v2/list_managed_devices`` lists it.
 
     ``bngnt_managed_device_updated`` carries exactly this, so the app parses
     both with the same schema. ``admin_code_status`` comes from the admin code
@@ -657,6 +744,9 @@ class BNGntManagedDeviceRegistry:
         self._settings_backups = settings_backups
         self._devices: dict[str, BNGntManagedDeviceRecord] = {}
         self._pending_commands: dict[str, asyncio.Future] = {}
+        # Each pending command's target, and whether it was registered when the
+        # command went out.
+        self._pending_targets: dict[str, tuple[tuple[str, str], bool]] = {}
         self._offline_check_unsub: callable | None = None
         self._ha_stop_unsub: CALLBACK_TYPE | None = None
 
@@ -676,7 +766,7 @@ class BNGntManagedDeviceRegistry:
         )
 
     def stop(self) -> None:
-        """Stop the offline checker, persist, and cancel pending commands."""
+        """Stop the offline checker, persist, and fail pending commands."""
         if self._offline_check_unsub:
             self._offline_check_unsub()
             self._offline_check_unsub = None
@@ -689,10 +779,13 @@ class BNGntManagedDeviceRegistry:
         # does, so last_seen is written here as well as on HA stop.
         self._persist_devices()
 
+        # An exception rather than a cancel: a waiting WebSocket command or
+        # service still answers, and a CancelledError stays a real cancellation.
         for future in self._pending_commands.values():
             if not future.done():
-                future.cancel()
+                future.set_exception(BNGntManagedDeviceUnloadedError())
         self._pending_commands.clear()
+        self._pending_targets.clear()
 
     @callback
     def _persist_on_ha_stop(self, _event: Event) -> None:
@@ -725,7 +818,7 @@ class BNGntManagedDeviceRegistry:
         return self._find_key(profile_id, device_id)
 
     def serialize(self, key: str) -> dict[str, Any]:
-        """Return the record as ``list_managed_devices`` lists it."""
+        """Return the record as ``zendo/v2/list_managed_devices`` lists it."""
         return _serialize_managed_device(
             self._hass,
             self._entry.entry_id,
@@ -931,8 +1024,8 @@ class BNGntManagedDeviceRegistry:
         Raises ``BNGntManagedDeviceError`` with ``replacement_not_registered``
         or ``target_not_found``.
         """
-        # Keep this synchronous: no other service call may run between
-        # finding the two records and changing them.
+        # Keep this synchronous: no other call may run between finding the two
+        # records and changing them.
         replacement_key = self._find_key(profile_id, device_id)
         if replacement_key is None:
             raise BNGntManagedDeviceError(ERROR_REPLACEMENT_NOT_REGISTERED)
@@ -1007,9 +1100,11 @@ class BNGntManagedDeviceRegistry:
     async def send_command(
         self, key: str, method: str, params: dict | None = None
     ) -> dict:
-        """Fire a JSON-RPC command event and wait for the device response.
+        """Send a JSON-RPC command to the device and wait for its response.
 
-        The round-trip works via the HA event bus:
+        To a registered device, the command goes in an envelope to the
+        ``zendo/v2/subscribe_events`` subscriptions (see ``device_api.py``). To
+        any other, the round-trip works via the HA event bus:
         1. Fire ``bngnt_managed_device_command`` with a JSON-stringified
            JSON-RPC request and the attached ``profile_id`` + ``device_id``.
         2. The Zendo app receives it via WebSocket, processes the RPC,
@@ -1019,17 +1114,35 @@ class BNGntManagedDeviceRegistry:
            unblocking this coroutine.
 
         Raises ``HomeAssistantError``: ``BNGntManagedDeviceTimeoutError`` on
-        timeout, and ``BNGntManagedDeviceCommandError`` if the device returns
-        a JSON-RPC error object. Method not found means the app on the device
-        predates the command, and gets a message that says so instead.
+        timeout, ``BNGntManagedDeviceUnloadedError`` when the integration unloads
+        first, and ``BNGntManagedDeviceCommandError`` if the device returns a
+        JSON-RPC error object. ``BNGntManagedDeviceAppUpdateRequiredError``
+        when the device answers Method not found, its app predating the
+        command. Before sending anything, as ``command_refusal`` decides:
+        ``BNGntManagedDeviceOfflineError``, and when the method is
+        ``adminCode.set`` or ``app.lock`` and the device hasn't registered,
+        ``BNGntManagedDeviceNotLinkedError`` if Home Assistant isn't linked,
+        or else ``BNGntManagedDeviceAppUpdateRequiredError``.
         """
         device = self._devices.get(key)
         if not device:
             raise HomeAssistantError(f"Unknown managed device: {key}")
-        if not device["online"]:
-            raise HomeAssistantError(
-                f"Device '{device['device_name']}' is offline"
-            )
+
+        target = (device["profile_id"], device["device_id"])
+        auth = self._hass.data[DOMAIN].get("device_auth")
+        registration = auth.registration_for(*target) if auth is not None else None
+        refusal = command_refusal(
+            method,
+            online=device["online"],
+            registered=registration is not None,
+            linked=auth is not None and auth.is_linked,
+        )
+        if refusal is CommandRefusal.NOT_LINKED:
+            raise BNGntManagedDeviceNotLinkedError()
+        if refusal is CommandRefusal.OFFLINE:
+            raise BNGntManagedDeviceOfflineError(device["device_name"])
+        if refusal is CommandRefusal.APP_UPDATE_REQUIRED:
+            raise BNGntManagedDeviceAppUpdateRequiredError(device["device_name"])
 
         rpc_id = str(uuid.uuid4())
         rpc_request = {
@@ -1041,15 +1154,19 @@ class BNGntManagedDeviceRegistry:
 
         future: asyncio.Future = self._hass.loop.create_future()
         self._pending_commands[rpc_id] = future
+        self._pending_targets[rpc_id] = (target, registration is not None)
 
-        self._hass.bus.async_fire(
-            "bngnt_managed_device_command",
-            {
-                "profile_id": device["profile_id"],
-                "device_id": device["device_id"],
-                "request": json.dumps(rpc_request),
-            },
-        )
+        if registration is not None:
+            auth.send_command(registration, rpc_request)
+        else:
+            self._hass.bus.async_fire(
+                EVENT_MANAGED_DEVICE_COMMAND,
+                {
+                    "profile_id": device["profile_id"],
+                    "device_id": device["device_id"],
+                    "request": json.dumps(rpc_request),
+                },
+            )
 
         try:
             return await asyncio.wait_for(future, timeout=COMMAND_TIMEOUT)
@@ -1060,25 +1177,37 @@ class BNGntManagedDeviceRegistry:
             ) from None
         except BNGntManagedDeviceCommandError as err:
             if err.code == JSONRPC_METHOD_NOT_FOUND:
-                raise HomeAssistantError(
-                    f"Device '{device['device_name']}' needs a newer version "
-                    "of the Zendo app"
+                raise BNGntManagedDeviceAppUpdateRequiredError(
+                    device["device_name"]
                 ) from err
             raise
         finally:
             self._pending_commands.pop(rpc_id, None)
+            self._pending_targets.pop(rpc_id, None)
 
-    def handle_command_response(self, response: dict) -> None:
+    def handle_command_response(
+        self,
+        response: dict,
+        responder: tuple[str, str],
+        *,
+        registered_responder: bool,
+    ) -> None:
         """Correlate a JSON-RPC response by its ``id`` and resolve the future.
 
-        Called by the ``managed_device_command_response`` service handler.
-        The response is a parsed JSON-RPC 2.0 response dict. The ``id``
-        field must match a pending ``send_command`` call. Late responses
-        (after timeout) are silently dropped.
+        Called by the ``managed_device_command_response`` service handler and
+        the ``zendo/v2/managed_device_command_response`` command. The response
+        is a parsed JSON-RPC 2.0 response dict. The ``id`` field must match a
+        pending ``send_command`` call, and ``responder``, the
+        ``(profile_id, device_id)`` the answer comes from, must be the
+        command's target. An answer to a command sent to a registered device
+        counts only from its registration (``registered_responder``). Late
+        responses (after timeout) are silently dropped.
         """
         rpc_id = response.get("id")
-        if not rpc_id:
-            _LOGGER.warning("Command response missing 'id'")
+        # Every pending command's id is a string. Another JSON value matches none
+        # of them, and a list or an object can't be looked up at all.
+        if not rpc_id or not isinstance(rpc_id, str):
+            _LOGGER.warning("Command response without a usable 'id'")
             return
 
         future = self._pending_commands.get(rpc_id)
@@ -1087,6 +1216,16 @@ class BNGntManagedDeviceRegistry:
                 "No pending command for id %s (may have timed out)", rpc_id
             )
             return
+
+        target = self._pending_targets.get(rpc_id)
+        if target is not None:
+            target_ids, to_registered = target
+            if responder != target_ids or (to_registered and not registered_responder):
+                _LOGGER.debug(
+                    "Ignoring an answer to command %s from a device it wasn't sent to",
+                    rpc_id,
+                )
+                return
 
         if "error" in response:
             error = response["error"]
@@ -1581,24 +1720,32 @@ def _get_registry(hass: HomeAssistant) -> BNGntManagedDeviceRegistry:
     return registry
 
 
-async def handle_register_managed_device(
-    hass: HomeAssistant, call: ServiceCall
+# Shared by the v1 services below and the zendo/v2/ commands in device_api.py.
+# Each takes the device's ids from the caller: the service's own fields for an
+# older app (v1), or a device's registration (v2). list_managed_devices and
+# replace_managed_device are v2 only.
+
+def register_managed_device(
+    registry: BNGntManagedDeviceRegistry,
+    profile_id: str,
+    device_id: str,
+    info: dict[str, Any],
 ) -> dict:
-    registry = _get_registry(hass)
+    """Register the device's managed device from validated device info."""
     managed_device_id = registry.register_device(
-        profile_id=call.data["profile_id"],
-        device_id=call.data["device_id"],
-        device_name=call.data["device_name"],
-        device_brand=call.data["device_brand"],
-        device_type=call.data["device_type"],
-        device_model_name=call.data["device_model_name"],
-        device_model_slug=call.data.get("device_model_slug"),
-        device_launcher_id=call.data.get("device_launcher_id"),
-        device_serial_number=call.data.get("device_serial_number"),
-        device_os=call.data["device_os"],
-        device_os_version=call.data.get("device_os_version"),
-        app_version=call.data["app_version"],
-        managed_device_id=call.data.get("managed_device_id"),
+        profile_id=profile_id,
+        device_id=device_id,
+        device_name=info["device_name"],
+        device_brand=info["device_brand"],
+        device_type=info["device_type"],
+        device_model_name=info["device_model_name"],
+        device_model_slug=info.get("device_model_slug"),
+        device_launcher_id=info.get("device_launcher_id"),
+        device_serial_number=info.get("device_serial_number"),
+        device_os=info["device_os"],
+        device_os_version=info.get("device_os_version"),
+        app_version=info["app_version"],
+        managed_device_id=info.get("managed_device_id"),
     )
     return {
         "success": True,
@@ -1609,36 +1756,17 @@ async def handle_register_managed_device(
     }
 
 
-async def handle_unregister_managed_device(
-    hass: HomeAssistant, call: ServiceCall
+def unregister_managed_device(
+    registry: BNGntManagedDeviceRegistry, profile_id: str, device_id: str
 ) -> dict:
-    registry = _get_registry(hass)
-    registered = registry.unregister_device(
-        profile_id=call.data["profile_id"],
-        device_id=call.data["device_id"],
-    )
+    registered = registry.unregister_device(profile_id=profile_id, device_id=device_id)
     return {"success": True, "registered": registered}
 
 
-async def handle_managed_device_command_response(
-    hass: HomeAssistant, call: ServiceCall
-) -> None:
-    registry = _get_registry(hass)
-    raw = call.data["response"]
-    try:
-        response = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as err:
-        _LOGGER.warning("Invalid JSON in command response: %s", err)
-        return
-
-    registry.handle_command_response(response)
-
-
-async def handle_update_managed_device_state(
-    hass: HomeAssistant, call: ServiceCall
-) -> dict:
-    registry = _get_registry(hass)
-    raw = call.data["state"]
+def parse_state(raw: Any) -> dict:
+    """Return a state given as an object or a JSON-stringified object."""
+    if isinstance(raw, dict):
+        return raw
     try:
         state = json.loads(raw)
     except (json.JSONDecodeError, TypeError) as err:
@@ -1646,12 +1774,16 @@ async def handle_update_managed_device_state(
 
     if not isinstance(state, dict):
         raise HomeAssistantError("state must be a JSON object")
+    return state
 
-    key = registry.update_state(
-        profile_id=call.data["profile_id"],
-        device_id=call.data["device_id"],
-        state=state,
-    )
+
+def update_managed_device_state(
+    registry: BNGntManagedDeviceRegistry,
+    profile_id: str,
+    device_id: str,
+    state: dict,
+) -> dict:
+    key = registry.update_state(profile_id=profile_id, device_id=device_id, state=state)
     return {
         "success": True,
         "registered": key is not None,
@@ -1661,26 +1793,33 @@ async def handle_update_managed_device_state(
     }
 
 
-async def handle_list_managed_devices(
-    hass: HomeAssistant, call: ServiceCall
-) -> dict:
-    registry = _get_registry(hass)
-    return {
-        "managed_devices": [
-            registry.serialize(key) for key, _ in registry.list_devices()
-        ]
-    }
+def parse_command_response(raw: Any) -> dict | None:
+    """Return a command response given as an object or a JSON string."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        response = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as err:
+        _LOGGER.warning("Invalid JSON in command response: %s", err)
+        return None
+    return response if isinstance(response, dict) else None
 
 
-async def handle_replace_managed_device(
-    hass: HomeAssistant, call: ServiceCall
+def list_managed_devices(registry: BNGntManagedDeviceRegistry) -> list[dict]:
+    return [registry.serialize(key) for key, _ in registry.list_devices()]
+
+
+def replace_managed_device(
+    registry: BNGntManagedDeviceRegistry,
+    profile_id: str,
+    device_id: str,
+    managed_device_id: str,
 ) -> dict:
-    registry = _get_registry(hass)
     try:
         managed_device_id, previous_device_name = registry.replace_device(
-            profile_id=call.data["profile_id"],
-            device_id=call.data["device_id"],
-            managed_device_id=call.data["managed_device_id"],
+            profile_id=profile_id,
+            device_id=device_id,
+            managed_device_id=managed_device_id,
         )
     except BNGntManagedDeviceError as err:
         return {"success": False, "error": err.code}
@@ -1692,16 +1831,88 @@ async def handle_replace_managed_device(
     }
 
 
-async def handle_delete_managed_device(
-    hass: HomeAssistant, call: ServiceCall
+def delete_managed_device(
+    registry: BNGntManagedDeviceRegistry, managed_device_id: str
 ) -> dict:
-    registry = _get_registry(hass)
     try:
-        deleted = registry.delete_device(call.data["managed_device_id"])
+        deleted = registry.delete_device(managed_device_id)
     except BNGntManagedDeviceError as err:
         return {"success": False, "error": err.code}
 
     return {"success": True, "deleted": deleted}
+
+
+def _call_ids(call: ServiceCall) -> tuple[str, str]:
+    return (call.data["profile_id"], call.data["device_id"])
+
+
+def _without_settings_restore_pending(answer: dict) -> dict:
+    # From 2.0.0 a settings restore is fetched only with zendo/v2/. The app
+    # reads a missing settings_restore_pending as no restore pending.
+    answer.pop("settings_restore_pending", None)
+    return answer
+
+
+def _kept_panel_info(
+    registry: BNGntManagedDeviceRegistry, profile_id: str, device_id: str
+) -> dict[str, Any]:
+    """Return a wall panel's fields of the record the device is attached to."""
+    key = registry.find_key(profile_id, device_id)
+    device = registry.get_device(key) if key is not None else None
+    if device is None:
+        return {}
+    return {field: device.get(field) for field in PANEL_INFO_FIELD_NAMES}
+
+
+async def handle_register_managed_device(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict:
+    registry = _get_registry(hass)
+    ids = _call_ids(call)
+    if is_v1_refused(hass, "register_managed_device", ids):
+        return dict(V1_REFUSED_RESULT)
+    # The schema takes none of a wall panel's fields, so the record keeps the
+    # ones it has, and a new record has none.
+    info = {**call.data, **_kept_panel_info(registry, *ids)}
+    return _without_settings_restore_pending(
+        register_managed_device(registry, *ids, info)
+    )
+
+
+async def handle_unregister_managed_device(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict:
+    registry = _get_registry(hass)
+    if is_v1_refused(hass, "unregister_managed_device", _call_ids(call)):
+        return dict(V1_REFUSED_RESULT)
+    return unregister_managed_device(registry, *_call_ids(call))
+
+
+async def handle_managed_device_command_response(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    registry = _get_registry(hass)
+    raise_if_v1_refused(hass, "managed_device_command_response", _call_ids(call))
+    response = parse_command_response(call.data["response"])
+    if response is None:
+        return
+
+    registry.handle_command_response(
+        response, _call_ids(call), registered_responder=False
+    )
+
+
+async def handle_update_managed_device_state(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict:
+    registry = _get_registry(hass)
+    if is_v1_refused(hass, "update_managed_device_state", _call_ids(call)):
+        return dict(V1_REFUSED_RESULT)
+    return _without_settings_restore_pending(
+        update_managed_device_state(
+            registry, *_call_ids(call), parse_state(call.data["state"])
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1901,16 +2112,73 @@ async def handle_managed_device_app_reload(
     await _fan_out_command(registry, keys, "app.reload")
 
 
+def _lock_failure(
+    registry: BNGntManagedDeviceRegistry, key: str, error: HomeAssistantError
+) -> str:
+    if isinstance(error, BNGntManagedDeviceCommandError):
+        device = registry.get_device(key)
+        name = device["device_name"] if device else key
+        return f"Device '{name}' returned error: {error.device_message}"
+    return str(error)
+
+
+def _lock_failure_message(
+    registry: BNGntManagedDeviceRegistry,
+    failures: list[tuple[str, HomeAssistantError]],
+    total: int,
+) -> str:
+    reasons = " ".join(
+        f"{_lock_failure(registry, key, error).rstrip('.')}."
+        for key, error in failures
+    )
+    message = f"Couldn't lock {len(failures)} of {total} devices. {reasons}"
+    succeeded = total - len(failures)
+    if succeeded == 0:
+        return message
+    if succeeded == 1:
+        return f"{message} The other device was locked."
+    return f"{message} The other {succeeded} devices were locked."
+
+
 async def handle_managed_device_app_lock(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
+    """Lock each device with the PIN.
+
+    Every device that can be locked is sent the command, whatever the others
+    do, and the call waits for all of them. It then fails naming each device
+    that wasn't locked and why, a device that hasn't registered included: it
+    needs a newer version of the app, and is sent nothing. With one device, the
+    error is that device's own.
+
+    On a Home Assistant that isn't linked, no device can take it, so the error
+    says that once instead of naming each device.
+    """
     registry, keys = _resolve_devices_for_command(hass, call)
+    keys = list(dict.fromkeys(keys))
 
     params: dict = {"pin": call.data["pin"]}
     if "message" in call.data:
         params["message"] = call.data["message"]
 
-    await _fan_out_command(registry, keys, "app.lock", params)
+    outcomes = await asyncio.gather(
+        *(registry.send_command(key, "app.lock", params) for key in keys),
+        return_exceptions=True,
+    )
+
+    failures: list[tuple[str, HomeAssistantError]] = []
+    for key, outcome in zip(keys, outcomes, strict=True):
+        if isinstance(outcome, BNGntManagedDeviceNotLinkedError):
+            raise outcome
+        if isinstance(outcome, HomeAssistantError):
+            failures.append((key, outcome))
+        elif isinstance(outcome, BaseException):
+            raise outcome
+    if not failures:
+        return
+    if len(keys) == 1:
+        raise failures[0][1]
+    raise HomeAssistantError(_lock_failure_message(registry, failures, len(keys)))
 
 
 async def handle_managed_device_app_unlock(

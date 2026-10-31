@@ -17,6 +17,9 @@ CONF_REFRESH_TIMESTAMPS = "refresh_timestamps"
 CONF_CACHED_PROFILES = "cached_profiles"
 CONF_CACHED_DEEP_LINK_DESTINATIONS = "cached_deep_link_destinations"
 CONF_MANAGED_DEVICES = "managed_devices"
+# The Zendo site this Home Assistant belongs to, stored with its push token. Set
+# once: by zendo/v2/set_up, or from the push token an older version stored.
+CONF_LINKED_SITE_ID = "linked_site_id"
 
 # The identifier of the HA device that groups the status sensor, people and
 # device groups. Never a valid managed device ID.

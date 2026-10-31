@@ -1,7 +1,7 @@
 """Event platform.
 
 Creates an EventEntity per device group, the wall panels and tablets that
-belong to the home rather than to a person. A device group can't receive push
+belong to the property rather than to a person. A device group can't receive push
 notifications, so it gets no notify entity: this entity is what
 ``zendo.ring_doorbell`` targets instead, and it records each ring sent to it.
 """

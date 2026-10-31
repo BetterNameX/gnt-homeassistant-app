@@ -11,7 +11,7 @@ import json
 import logging
 from typing import Any
 
-from aiohttp import ClientTimeout
+from aiohttp import ClientConnectionError, ClientTimeout
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -21,7 +21,7 @@ from .profiles import (
     PROFILE_CAN_RECEIVE_PUSH_NOTIFICATIONS,
     can_receive_push_notifications,
 )
-from .service_discovery import get_control_backend_url
+from .service_discovery import BNGntControlBackendUrlError, get_control_backend_url
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +35,14 @@ query HASitePushNotificationControlBackendDetails {
             label
             canReceivePushNotifications
         }
+    }
+}
+"""
+
+QUERY_SITE_ID = """
+query HASitePushNotificationControlBackendSite {
+    res: sitePushNotificationControlBackendDetails {
+        siteId
     }
 }
 """
@@ -103,6 +111,30 @@ async def fetch_profiles(
         }
         for p in profiles
     ]
+
+
+class BNGntControlBackendNoAnswerError(Exception):
+    """The control backend gave no answer at all.
+
+    It can't be reached, it timed out, or its URL can't be resolved.
+    """
+
+
+async def fetch_site_id(hass: HomeAssistant, token: str) -> str:
+    """Return the site a push token belongs to.
+
+    Raises ``BNGntControlBackendNoAnswerError`` when the control backend gives no
+    answer at all. Any other error means it answered, without a site: an HTTP
+    status, GraphQL errors, or a response that doesn't have one.
+    """
+    try:
+        data = await _graphql_request(hass, token, QUERY_SITE_ID)
+    except (ClientConnectionError, TimeoutError, BNGntControlBackendUrlError) as err:
+        raise BNGntControlBackendNoAnswerError from err
+    site_id = data.get("res", {}).get("siteId")
+    if not isinstance(site_id, str) or not site_id:
+        raise RuntimeError("The control backend answered without a site")
+    return site_id
 
 
 async def send_notification(

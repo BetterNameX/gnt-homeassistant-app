@@ -1,0 +1,542 @@
+{
+  "_readme": "Golden vectors for the device control backend token, the signing keys record, the command envelope and sealed payloads, from docs/architecture-decisions/companion-app-authentication.md. Each implementation (the Home Assistant integration, the Homey app, the Zendo app) copies this file into its tests and checks every case. Every key below is a test key only: never use one anywhere else. Tests inject `now` as the current time and `linkedSiteId` as the hub's linked site, and read the signing keys from `keysRecord`. Token `expect` is valid or invalid, and `registration` is what v2 registration answers for it: accept, or the error code. Envelope `expect` is accept, refuse (answer the command with an error) or drop (not for this device), for the device in `device`. Sealed payload `expect` is accept or refuse. Every ecies-p256 case gives its fixed one-off key and nonce, and the intermediates, under `inputs`, so an implementation can reproduce the exact bytes when sealing.",
+  "version": 2,
+  "now": 1798761600,
+  "linkedSiteId": "site_vectors_1",
+  "issuer": "https://device-control-backend.production.gnt.betterna.me",
+  "audience": "api:device-control-backend",
+  "adminScope": "device-control-backend:admin",
+  "keys": {
+    "current": {
+      "alg": "ES256",
+      "privateKeyPkcs8Pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgbv7zVjQdJ7YJk0mI\nXIPH1M7QgR2aXxOt9ge+yfRovPqhRANCAAShi2PkXNTUuyTMW4TdE5WhrPowEZoJ\nVShnKAaDy9XXAmCWzB+lA8/wJV29hrXf9aSnrCIqVDVgWNdVogbXobf8\n-----END PRIVATE KEY-----\n",
+      "publicKeySpkiBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoYtj5FzU1LskzFuE3ROVoaz6MBGaCVUoZygGg8vV1wJglswfpQPP8CVdvYa13/Wkp6wiKlQ1YFjXVaIG16G3/A==",
+      "kid": "66190c21352fb268"
+    },
+    "next": {
+      "alg": "ES256",
+      "privateKeyPkcs8Pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgBU/+t2wZ47eE2X6j\nN4PDzEfvDHWFBHoFeI0JU5v7NXGhRANCAAQFvR7HyBSP9LuI5yDk+aDi5gzIBrqo\nOYX17nVI5ytbWbaCfNr2XMFCUgI5lLPTPSevYq7iy6msr9hExmxYSXVW\n-----END PRIVATE KEY-----\n",
+      "publicKeySpkiBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBb0ex8gUj/S7iOcg5Pmg4uYMyAa6qDmF9e51SOcrW1m2gnza9lzBQlICOZSz0z0nr2Ku4suprK/YRMZsWEl1Vg==",
+      "kid": "a8d67ad6a92e9f99"
+    },
+    "kidRule": "Lowercase hex of the first 8 bytes of SHA-256 over the public key's DER SPKI"
+  },
+  "tokens": [
+    {
+      "name": "valid-plain",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAifQ.P5hVQp948Jk6T6AlVmThcEdydfLmH_Y3X76r_kczjP95DLv05LprCzf-P2ygGMt6Xd9VriKOY_rJ-wkI3AgpHA",
+      "expect": "valid",
+      "registration": "accept",
+      "reason": "Signed by the current key, for the linked site, unexpired, no admin scope, with the device's public key"
+    },
+    {
+      "name": "valid-admin",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAiLCJzY29wZSI6ImRldmljZS1jb250cm9sLWJhY2tlbmQ6YWRtaW4ifQ.Xn0JsE-hjCPDvMY-Xq8TySlNS8tfO0GJUPJNU2Cdm4tXD-26jM6Sl5Vw7QUjOh4J4_c3rEnejLExZDwOarPdyg",
+      "expect": "valid",
+      "admin": true,
+      "registration": "accept",
+      "reason": "As valid-plain, with the admin scope"
+    },
+    {
+      "name": "valid-no-public-key",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiaWF0IjoxNzk4NzYxMDAwLCJleHAiOjE3OTg4NDc0MDAsImlzcyI6Imh0dHBzOi8vZGV2aWNlLWNvbnRyb2wtYmFja2VuZC5wcm9kdWN0aW9uLmdudC5iZXR0ZXJuYS5tZSIsImF1ZCI6ImFwaTpkZXZpY2UtY29udHJvbC1iYWNrZW5kIiwianRpIjoiNmYxZDJjM2ItNGE1OS00ZThmLTlkNzAtMWIyYzNkNGU1ZjYwIn0.qg_QCDcPPxUd9j0reAbb78yHPpkAiOEWARh7i0TovLbPfjsYYmQB080mu3rpsKSGfGyRW0bVGYuTdWAJq2npVA",
+      "expect": "valid",
+      "registration": "public_key_required",
+      "reason": "A valid token from an older app, with no encryptionPublicKey claim: v2 registration refuses it"
+    },
+    {
+      "name": "valid-public-key-not-p256",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Db3dCUVlESzJWd0F5RUFkU0xQQjNEWXZSaXM4b3k5emYxalhwZWlnK2h1KzhWTzdyRFJWSm9hcG9nPSIsImlhdCI6MTc5ODc2MTAwMCwiZXhwIjoxNzk4ODQ3NDAwLCJpc3MiOiJodHRwczovL2RldmljZS1jb250cm9sLWJhY2tlbmQucHJvZHVjdGlvbi5nbnQuYmV0dGVybmEubWUiLCJhdWQiOiJhcGk6ZGV2aWNlLWNvbnRyb2wtYmFja2VuZCIsImp0aSI6IjZmMWQyYzNiLTRhNTktNGU4Zi05ZDcwLTFiMmMzZDRlNWY2MCJ9.FoVT8GlJ0wdRE-Y_Hd1knvW-lpNr4TSjJE0iaTjGc1Djyz_4nBxWwCQWyp4dh24iMG_Q3fkDVrykHJIEMit6Cw",
+      "expect": "valid",
+      "registration": "public_key_required",
+      "reason": "encryptionPublicKey is a valid DER SPKI, but of an Ed25519 key, not P-256: v2 registration refuses it"
+    },
+    {
+      "name": "expired",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg1ODg4MDAsImV4cCI6MTc5ODY3NTIwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAifQ.Ak-9ty0wKtPe9FdlbD_jdiM7bbxUZG-LcvIz_UfkoOZ3oRgOb5Ybl-IDHvhItxuQxofmeA7wgZkmBfBXwAm4bg",
+      "expect": "invalid",
+      "registration": "invalid_token",
+      "reason": "exp is before now"
+    },
+    {
+      "name": "wrong-site",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMiIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAiLCJzY29wZSI6ImRldmljZS1jb250cm9sLWJhY2tlbmQ6YWRtaW4ifQ.1LkMexLKeEZRd2Gzf-fsmlQ2ZEhaXiEqyVqVcILy422VGLJT3rUBJPz-gfCZQ1kVRQ0sD0HbG2QnM8I9t-MyLw",
+      "expect": "invalid",
+      "registration": "wrong_site",
+      "reason": "siteId is not the linked site"
+    },
+    {
+      "name": "wrong-audience",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmVuZC11c2VyLWRldmljZSIsImp0aSI6IjZmMWQyYzNiLTRhNTktNGU4Zi05ZDcwLTFiMmMzZDRlNWY2MCJ9.tZ40GXJo21RAadi42GrP0Zr17vTZhesCQvZgV8LhrkBRtLtfcqJRe8YT7cfWTkWUFy1f367_gYnW1PN9goM1EA",
+      "expect": "invalid",
+      "registration": "invalid_token",
+      "reason": "aud is not api:device-control-backend"
+    },
+    {
+      "name": "wrong-issuer",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnRlc3RpbmcuZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAifQ.CK9cKe77elwCjRelidvaAyZs9wps6ToKnNaczG2SMpXUrOBWX22LdHK_3UUiY70aQet90uc0mQdiUZMZAUf9Vw",
+      "expect": "invalid",
+      "registration": "invalid_token",
+      "reason": "iss is another environment"
+    },
+    {
+      "name": "bad-signature",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjY2MTkwYzIxMzUyZmIyNjgifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAifQ.sWNuvInDrMfi3Izo41oKtP5v1lBfkIla4sAUcIb860xIXTJjiYuGDto272erQZ8eUOohrwa1ZHDVjzS5wSkNxQ",
+      "expect": "invalid",
+      "registration": "invalid_token",
+      "reason": "Names the current kid but is signed with another key"
+    },
+    {
+      "name": "unknown-kid",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImZmZmZmZmZmZmZmZmZmZmYifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAifQ.0ek8Lcy82xlONrA7ZYOHuJZvZ0tOG4mQrCFZDGoNP4pRmWJ3mtDvK1kxVR2J5QD9YO4jbbH5NnWvce0_gO4rJw",
+      "expect": "invalid",
+      "registration": "invalid_token",
+      "reason": "kid is not in the keys record"
+    },
+    {
+      "name": "key-not-yet-valid",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImE4ZDY3YWQ2YTkyZTlmOTkifQ.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAifQ.dhx1Ln-fOkI5m3d_tO8XiLR96a-_slJE4Z0LupeKVhpa7t5PAXmjRunNG1TlkO2sN7q4DsQduxUmSaJ_Gg2MeQ",
+      "expect": "invalid",
+      "registration": "invalid_token",
+      "reason": "Signed by the next key, whose nbf is after now"
+    },
+    {
+      "name": "alg-none",
+      "token": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzaXRlSWQiOiJzaXRlX3ZlY3RvcnNfMSIsInByb2ZpbGVJZCI6InByb2ZpbGVfdmVjdG9yc18xIiwiZGV2aWNlSWQiOiJkZXZpY2VfdmVjdG9yc18xIiwiZW5jcnlwdGlvblB1YmxpY0tleSI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRS9YYnk1L1doTUIwVTNBUmFsTzU0S3ZMVk4vOEMxZnA4ZGEzZXBCUDNpcGVDcTRFZ2laSkh4WmRsdzBoT3NXM3VEQ0N1K3VwdFJkRkJuN0c5YWRzSGF3PT0iLCJpYXQiOjE3OTg3NjEwMDAsImV4cCI6MTc5ODg0NzQwMCwiaXNzIjoiaHR0cHM6Ly9kZXZpY2UtY29udHJvbC1iYWNrZW5kLnByb2R1Y3Rpb24uZ250LmJldHRlcm5hLm1lIiwiYXVkIjoiYXBpOmRldmljZS1jb250cm9sLWJhY2tlbmQiLCJqdGkiOiI2ZjFkMmMzYi00YTU5LTRlOGYtOWQ3MC0xYjJjM2Q0ZTVmNjAiLCJzY29wZSI6ImRldmljZS1jb250cm9sLWJhY2tlbmQ6YWRtaW4ifQ.",
+      "expect": "invalid",
+      "registration": "invalid_token",
+      "reason": "alg is none: only ES256 is accepted"
+    }
+  ],
+  "keysRecord": {
+    "name": "device-control-backend.v1.keys.gnt.betterna.me",
+    "content": "{\"keys\":[{\"alg\":\"ES256\",\"exp\":1830297600,\"key\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoYtj5FzU1LskzFuE3ROVoaz6MBGaCVUoZygGg8vV1wJglswfpQPP8CVdvYa13/Wkp6wiKlQ1YFjXVaIG16G3/A==\",\"kid\":\"66190c21352fb268\",\"nbf\":1796169600},{\"alg\":\"ES256\",\"exp\":1861833600,\"key\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBb0ex8gUj/S7iOcg5Pmg4uYMyAa6qDmF9e51SOcrW1m2gnza9lzBQlICOZSz0z0nr2Ku4suprK/YRMZsWEl1Vg==\",\"kid\":\"a8d67ad6a92e9f99\",\"nbf\":1824681600}],\"ttl\":3600}",
+    "parsed": {
+      "keys": [
+        {
+          "alg": "ES256",
+          "exp": 1830297600,
+          "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoYtj5FzU1LskzFuE3ROVoaz6MBGaCVUoZygGg8vV1wJglswfpQPP8CVdvYa13/Wkp6wiKlQ1YFjXVaIG16G3/A==",
+          "kid": "66190c21352fb268",
+          "nbf": 1796169600
+        },
+        {
+          "alg": "ES256",
+          "exp": 1861833600,
+          "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBb0ex8gUj/S7iOcg5Pmg4uYMyAa6qDmF9e51SOcrW1m2gnza9lzBQlICOZSz0z0nr2Ku4suprK/YRMZsWEl1Vg==",
+          "kid": "a8d67ad6a92e9f99",
+          "nbf": 1824681600
+        }
+      ],
+      "ttl": 3600
+    },
+    "txtStrings": [
+      "{\"keys\":[{\"alg\":\"ES256\",\"exp\":1830297600,\"key\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoYtj5FzU1LskzFuE3ROVoaz6MBGaCVUoZygGg8vV1wJglswfpQPP8CVdvYa13/Wkp6wiKlQ1YFjXVaIG16G3/A==\",\"kid\":\"66190c21352fb268\",\"nbf\":1796169600},{\"alg\":\"ES256\",\"exp\":1861833600,\"key\":",
+      "\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBb0ex8gUj/S7iOcg5Pmg4uYMyAa6qDmF9e51SOcrW1m2gnza9lzBQlICOZSz0z0nr2Ku4suprK/YRMZsWEl1Vg==\",\"kid\":\"a8d67ad6a92e9f99\",\"nbf\":1824681600}],\"ttl\":3600}"
+    ],
+    "dohJsonAnswers": {
+      "cloudflare": {
+        "Status": 0,
+        "AD": true,
+        "Answer": [
+          {
+            "name": "device-control-backend.v1.keys.gnt.betterna.me",
+            "type": 16,
+            "TTL": 60,
+            "data": "\"{\\\"keys\\\":[{\\\"alg\\\":\\\"ES256\\\",\\\"exp\\\":1830297600,\\\"key\\\":\\\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoYtj5FzU1LskzFuE3ROVoaz6MBGaCVUoZygGg8vV1wJglswfpQPP8CVdvYa13/Wkp6wiKlQ1YFjXVaIG16G3/A==\\\",\\\"kid\\\":\\\"66190c21352fb268\\\",\\\"nbf\\\":1796169600},{\\\"alg\\\":\\\"ES256\\\",\\\"exp\\\":1861833600,\\\"key\\\":\" \"\\\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBb0ex8gUj/S7iOcg5Pmg4uYMyAa6qDmF9e51SOcrW1m2gnza9lzBQlICOZSz0z0nr2Ku4suprK/YRMZsWEl1Vg==\\\",\\\"kid\\\":\\\"a8d67ad6a92e9f99\\\",\\\"nbf\\\":1824681600}],\\\"ttl\\\":3600}\""
+          }
+        ]
+      },
+      "google": {
+        "Status": 0,
+        "AD": true,
+        "Answer": [
+          {
+            "name": "device-control-backend.v1.keys.gnt.betterna.me.",
+            "type": 16,
+            "TTL": 60,
+            "data": "{\"keys\":[{\"alg\":\"ES256\",\"exp\":1830297600,\"key\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoYtj5FzU1LskzFuE3ROVoaz6MBGaCVUoZygGg8vV1wJglswfpQPP8CVdvYa13/Wkp6wiKlQ1YFjXVaIG16G3/A==\",\"kid\":\"66190c21352fb268\",\"nbf\":1796169600},{\"alg\":\"ES256\",\"exp\":1861833600,\"key\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBb0ex8gUj/S7iOcg5Pmg4uYMyAa6qDmF9e51SOcrW1m2gnza9lzBQlICOZSz0z0nr2Ku4suprK/YRMZsWEl1Vg==\",\"kid\":\"a8d67ad6a92e9f99\",\"nbf\":1824681600}],\"ttl\":3600}"
+          }
+        ]
+      }
+    },
+    "notes": "Cloudflare's JSON API returns a split record as quoted strings separated by spaces, with inner quotes and backslashes escaped; Google's returns it already joined. Homey's wire-format reader gets txtStrings. Accept the record only when AD is true."
+  },
+  "mustEncryptMethods": [
+    "adminCode.set",
+    "app.lock"
+  ],
+  "device": {
+    "profileId": "profile_vectors_1",
+    "deviceId": "device_vectors_1",
+    "keyId": "e23e3a73c4a61211",
+    "encryptionKey": {
+      "privateKeyPkcs8Pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgzJGrdaME/A+f1586\nu3ymB6s4stExE0dKFKUi6an28nuhRANCAAT9dvLn9aEwHRTcBFqU7ngq8tU3/wLV\n+nx1rd6kE/eKl4KrgSCJkkfFl2XDSE6xbe4MIK766m1F0UGfsb1p2wdr\n-----END PRIVATE KEY-----\n",
+      "privateScalarBase64": "zJGrdaME/A+f1586u3ymB6s4stExE0dKFKUi6an28ns=",
+      "publicKeySpkiBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/Xby5/WhMB0U3ARalO54KvLVN/8C1fp8da3epBP3ipeCq4EgiZJHxZdlw0hOsW3uDCCu+uptRdFBn7G9adsHaw==",
+      "publicKeyUncompressedBase64": "BP128uf1oTAdFNwEWpTueCry1Tf/AtX6fHWt3qQT94qXgquBIImSR8WXZcNITrFt7gwgrvrqbUXRQZ+xvWnbB2s=",
+      "keyId": "e23e3a73c4a61211"
+    }
+  },
+  "ecies": {
+    "scheme": "ecies-p256",
+    "steps": [
+      "Make a one-off P-256 key pair.",
+      "The shared secret is the ECDH 32-byte x-coordinate (noble getSharedSecret returns a 33-byte compressed point: drop its first byte).",
+      "HKDF-SHA256 with an empty salt and info = UTF-8 \"zendo ecies-p256 v1\" || one-off public key (65-byte uncompressed) || recipient public key (65-byte uncompressed), 32 bytes out.",
+      "AES-256-GCM with a random 12-byte nonce and the additional data.",
+      "Output: base64 of one-off public key (65) || nonce (12) || ciphertext || tag (16)."
+    ],
+    "hkdfInfoPrefix": "zendo ecies-p256 v1",
+    "keyIdRule": "Lowercase hex of the first 8 bytes of SHA-256 over the public key's DER SPKI"
+  },
+  "additionalDataFormat": {
+    "envelope": "UTF-8 of profileId, deviceId, id, encryption and keyId joined by \\n (keyId empty when absent)",
+    "sealed": "UTF-8 of \"sealed\", profileId, deviceId and method joined by \\n, with the target device for commands and answers, and the sending device for replies"
+  },
+  "envelopes": [
+    {
+      "name": "none",
+      "envelope": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "id": "9c4d2e1f-0b3a-4d5c-8e7f-6a5b4c3d2e1f",
+        "encryption": "none",
+        "payload": {
+          "jsonrpc": "2.0",
+          "method": "screen.wakeUp",
+          "params": {},
+          "id": "9c4d2e1f-0b3a-4d5c-8e7f-6a5b4c3d2e1f"
+        }
+      },
+      "expect": "accept",
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "screen.wakeUp",
+        "params": {},
+        "id": "9c4d2e1f-0b3a-4d5c-8e7f-6a5b4c3d2e1f"
+      },
+      "reason": "A method that isn't on the must-encrypt list, in clear"
+    },
+    {
+      "name": "ecies-p256",
+      "envelope": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "id": "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f",
+        "encryption": "ecies-p256",
+        "keyId": "e23e3a73c4a61211",
+        "payload": "BPT+XYozUEy0a9AGwhs3h1OjzWaEi5jjxOGPW54Y244qu8RgrwyGrs1bGlpvdWEop0JaI66nUCbcd/Av8AWYiGcAAQIDBAUGBwgJCgvcQqfPa9edmOSJVB983vkVgYytDYt2DloeTVgck2alQmF3K1PNsI7gjTYLdZJiALQ3NlYQXRf3zYAYNE6bjqZnRASNyW6OsvYrZP85dyAp7NutkeCDDAiZTtRKw5NYuezy3D9Ytzg1tujkZBDr07yIqtPkCeJPd/PK1Frw5QUwsCY="
+      },
+      "inputs": {
+        "oneOffPrivateScalarHex": "0340896c816028d25f801d18b772ccd615abb9b361ba6dc4f8d79ab873c1659b",
+        "oneOffPublicKeyUncompressedHex": "04f4fe5d8a33504cb46bd006c21b378753a3cd66848b98e3c4e18f5b9e18db8e2abbc460af0c86aecd5b1a5a6f756128a7425a23aea75026dc77f02ff005988867",
+        "nonceHex": "000102030405060708090a0b",
+        "sharedSecretHex": "172457596a9bc7820a6191a8687bc210c8456d45e822a47fdcae6e535e570983",
+        "hkdfInfoHex": "7a656e646f2065636965732d7032353620763104f4fe5d8a33504cb46bd006c21b378753a3cd66848b98e3c4e18f5b9e18db8e2abbc460af0c86aecd5b1a5a6f756128a7425a23aea75026dc77f02ff00598886704fd76f2e7f5a1301d14dc045a94ee782af2d537ff02d5fa7c75addea413f78a9782ab8120899247c59765c3484eb16dee0c20aefaea6d45d1419fb1bd69db076b",
+        "aesKeyHex": "d8d3b7d99364f1b59e93b9f1f99fe2e73552af0a3f7aa7d66d2651dbc903ed47",
+        "additionalData": "profile_vectors_1\ndevice_vectors_1\n3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f\necies-p256\ne23e3a73c4a61211",
+        "plaintext": "{\"jsonrpc\":\"2.0\",\"method\":\"adminCode.set\",\"params\":{\"code\":\"482915\"},\"id\":\"3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f\"}"
+      },
+      "expect": "accept",
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "adminCode.set",
+        "params": {
+          "code": "482915"
+        },
+        "id": "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f"
+      },
+      "reason": "Encrypted to this device's public key with a fixed one-off key and nonce; the inner id equals the envelope id"
+    },
+    {
+      "name": "ecies-p256-tampered-id",
+      "envelope": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "id": "9c4d2e1f-0b3a-4d5c-8e7f-6a5b4c3d2e1f",
+        "encryption": "ecies-p256",
+        "keyId": "e23e3a73c4a61211",
+        "payload": "BPT+XYozUEy0a9AGwhs3h1OjzWaEi5jjxOGPW54Y244qu8RgrwyGrs1bGlpvdWEop0JaI66nUCbcd/Av8AWYiGcAAQIDBAUGBwgJCgvcQqfPa9edmOSJVB983vkVgYytDYt2DloeTVgck2alQmF3K1PNsI7gjTYLdZJiALQ3NlYQXRf3zYAYNE6bjqZnRASNyW6OsvYrZP85dyAp7NutkeCDDAiZTtRKw5NYuezy3D9Ytzg1tujkZBDr07yIqtPkCeJPd/PK1Frw5QUwsCY="
+      },
+      "expect": "refuse",
+      "reason": "The envelope id was changed, so the additional data no longer matches and decryption fails"
+    },
+    {
+      "name": "unknown-key-id",
+      "envelope": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "id": "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f",
+        "encryption": "ecies-p256",
+        "keyId": "ffffffffffffffff",
+        "payload": "BPT+XYozUEy0a9AGwhs3h1OjzWaEi5jjxOGPW54Y244qu8RgrwyGrs1bGlpvdWEop0JaI66nUCbcd/Av8AWYiGcAAQIDBAUGBwgJCgvcQqfPa9edmOSJVB983vkVgYytDYt2DloeTVgck2alQmF3K1PNsI7gjTYLdZJiALQ3NlYQXRf3zYAYNE6bjqZnRASNyW6OsvYrZP85dyAp7NutkeCDDAiZTtRKw5NYuezy3D9Ytzg1tujkZBDr07yIqtPkCeJPd/PK1Frw5QUwsCY="
+      },
+      "expect": "refuse",
+      "reason": "keyId is not the device's key: answer with an error at once, without decrypting"
+    },
+    {
+      "name": "secret-method-in-clear",
+      "envelope": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "id": "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f",
+        "encryption": "none",
+        "payload": {
+          "jsonrpc": "2.0",
+          "method": "adminCode.set",
+          "params": {
+            "code": "482915"
+          },
+          "id": "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f"
+        }
+      },
+      "expect": "refuse",
+      "reason": "adminCode.set is on the must-encrypt list"
+    },
+    {
+      "name": "other-device",
+      "envelope": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_2",
+        "id": "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f",
+        "encryption": "ecies-p256",
+        "keyId": "e23e3a73c4a61211",
+        "payload": "BPT+XYozUEy0a9AGwhs3h1OjzWaEi5jjxOGPW54Y244qu8RgrwyGrs1bGlpvdWEop0JaI66nUCbcd/Av8AWYiGcAAQIDBAUGBwgJCgvcQqfPa9edmOSJVB983vkVgYytDYt2DloeTVgck2alQmF3K1PNsI7gjTYLdZJiALQ3NlYQXRf3zYAYNE6bjqZnRASNyW6OsvYrZP85dyAp7NutkeCDDAiZTtRKw5NYuezy3D9Ytzg1tujkZBDr07yIqtPkCeJPd/PK1Frw5QUwsCY="
+      },
+      "expect": "drop",
+      "reason": "Addressed to another device: drop it without decrypting"
+    }
+  ],
+  "sealedPayloads": [
+    {
+      "name": "command-with-reply-key",
+      "kind": "command",
+      "method": "wifi.configure",
+      "id": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d",
+      "recipient": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "keyId": "e23e3a73c4a61211"
+      },
+      "params": {
+        "ssid": "Front office",
+        "sealed": {
+          "scheme": "ecies-p256",
+          "data": "BLDI3ACQ+cjAAiJmiorWBuV5hLYj2+/jGUDBW+DOW9c9Qo7HJ5GpuaaklVyXovQpyL/tTEy0WRGfPxMDeg7SGvcQERITFBUWFxgZGhueziQ6Ii/FPn7vUQiFKDgy8Q6WfhhkZcOddDtlUaASTCYlxZMGhit/izWTPKiEYDYfvw0K9W4Si4wiQOQvWTuW6SXwtcsWp/vJ+q4qZCrZXm+7AZqQnILypHGn0xZtxebt2kqRQUg1sDkSgfsfEx6Cp5tVWZni2GJ/HiXQy4rQ9aCPzKFVRrH7wY8zqdesql2zHEqpyAtgMHlMaaWcJenymk7GFjAejOAv3FvFIWvDya70tXZhqKxaEPxHkuPoCUnUzics4w=="
+        }
+      },
+      "inputs": {
+        "oneOffPrivateScalarHex": "718d498e7d3eecb1f35dca19a49f71a4205f8f4d556009f41491f7a614aec0fe",
+        "oneOffPublicKeyUncompressedHex": "04b0c8dc0090f9c8c00222668a8ad606e57984b623dbefe31940c15be0ce5bd73d428ec72791a9b9a6a4955c97a2f429c8bfed4c4cb459119f3f13037a0ed21af7",
+        "nonceHex": "101112131415161718191a1b",
+        "sharedSecretHex": "bf0f75c94b87e0462b5893f17dd3f23fe95902fba56ab637e3efd5875d325af2",
+        "hkdfInfoHex": "7a656e646f2065636965732d7032353620763104b0c8dc0090f9c8c00222668a8ad606e57984b623dbefe31940c15be0ce5bd73d428ec72791a9b9a6a4955c97a2f429c8bfed4c4cb459119f3f13037a0ed21af704fd76f2e7f5a1301d14dc045a94ee782af2d537ff02d5fa7c75addea413f78a9782ab8120899247c59765c3484eb16dee0c20aefaea6d45d1419fb1bd69db076b",
+        "aesKeyHex": "c7a8cc684574f367523550f6776b2cb227aed271f300d852bb50c238fadced75",
+        "additionalData": "sealed\nprofile_vectors_1\ndevice_vectors_1\nwifi.configure",
+        "plaintext": "{\"password\":\"correct horse battery staple\",\"replyKey\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpUXorD3FQZ3RVHRSiZKy7ca/kMV9Kh7w/zMl4iEEkEn0lANsSLrEjCiGyOsMhMSUlYAF3pY/Q7xfbQEqcsDSgQ==\"}"
+      },
+      "opened": {
+        "password": "correct horse battery staple",
+        "replyKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpUXorD3FQZ3RVHRSiZKy7ca/kMV9Kh7w/zMl4iEEkEn0lANsSLrEjCiGyOsMhMSUlYAF3pY/Q7xfbQEqcsDSgQ=="
+      },
+      "mergedParams": {
+        "ssid": "Front office",
+        "password": "correct horse battery staple",
+        "replyKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpUXorD3FQZ3RVHRSiZKy7ca/kMV9Kh7w/zMl4iEEkEn0lANsSLrEjCiGyOsMhMSUlYAF3pY/Q7xfbQEqcsDSgQ=="
+      },
+      "expect": "accept",
+      "reason": "Opened with the device's key and merged into the params; replyKey is the key to seal the reply to"
+    },
+    {
+      "name": "reply-to-reply-key",
+      "kind": "reply",
+      "method": "wifi.configure",
+      "id": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d",
+      "sender": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1"
+      },
+      "recipientReplyKey": {
+        "privateKeyPkcs8Pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgRkbSru4oz+9mFtUh\nNJZiAswC7kHtJUU3x3rL6pKMPzqhRANCAASlReisPcVBndFUdFKJkrLtxr+QxX0q\nHvD/MyXiIQSQSfSUA2xIusSMKIbI6wyExJSVgAXelj9DvF9tASpywNKB\n-----END PRIVATE KEY-----\n",
+        "privateScalarBase64": "RkbSru4oz+9mFtUhNJZiAswC7kHtJUU3x3rL6pKMPzo=",
+        "publicKeySpkiBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpUXorD3FQZ3RVHRSiZKy7ca/kMV9Kh7w/zMl4iEEkEn0lANsSLrEjCiGyOsMhMSUlYAF3pY/Q7xfbQEqcsDSgQ==",
+        "publicKeyUncompressedBase64": "BKVF6Kw9xUGd0VR0UomSsu3Gv5DFfSoe8P8zJeIhBJBJ9JQDbEi6xIwohsjrDITElJWABd6WP0O8X20BKnLA0oE=",
+        "keyId": "db581e4ebde6a306"
+      },
+      "result": {
+        "applied": true,
+        "sealed": {
+          "scheme": "ecies-p256",
+          "data": "BKeFoMLrA3o5YAMZXaQd6bdaBt7ni7HEMzkugn0BK0sMGjpBaDMj1czpb3r06K8KkB3q8D8LrSqHzW9NgMLnfXkgISIjJCUmJygpKitmMjDL3NZgxyNM180NsY1uv1BlJkJjW17seWP+fIenMtBKZiYXMlKghHAQcHHaQqM+bv3DJJshKgT2gA=="
+        }
+      },
+      "inputs": {
+        "oneOffPrivateScalarHex": "52c3dc068b087f3d3dd1e7c9f7b382c506106b6c8065423fea1605f4e5c2d418",
+        "oneOffPublicKeyUncompressedHex": "04a785a0c2eb037a396003195da41de9b75a06dee78bb1c433392e827d012b4b0c1a3a41683323d5cce96f7af4e8af0a901deaf03f0bad2a87cd6f4d80c2e77d79",
+        "nonceHex": "202122232425262728292a2b",
+        "sharedSecretHex": "44bc48486d686e2d23475d97b2fa292676b0333c7fcb9b3f77241dc6289a205c",
+        "hkdfInfoHex": "7a656e646f2065636965732d7032353620763104a785a0c2eb037a396003195da41de9b75a06dee78bb1c433392e827d012b4b0c1a3a41683323d5cce96f7af4e8af0a901deaf03f0bad2a87cd6f4d80c2e77d7904a545e8ac3dc5419dd15474528992b2edc6bf90c57d2a1ef0ff3325e221049049f494036c48bac48c2886c8eb0c84c494958005de963f43bc5f6d012a72c0d281",
+        "aesKeyHex": "3d7c2927eb4cfe645bf89bb48cecc9846b41c5f79ae3f1be89181084bcae0d74",
+        "additionalData": "sealed\nprofile_vectors_1\ndevice_vectors_1\nwifi.configure",
+        "plaintext": "{\"previousPassword\":\"old network password\"}"
+      },
+      "opened": {
+        "previousPassword": "old network password"
+      },
+      "mergedResult": {
+        "applied": true,
+        "previousPassword": "old network password"
+      },
+      "expect": "accept",
+      "reason": "The device sealed its reply to the one-off replyKey from the command; the admin's app opens it with that key's private half"
+    },
+    {
+      "name": "settings-restore-answer",
+      "kind": "answer",
+      "method": "settingsRestore.get",
+      "recipient": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "keyId": "e23e3a73c4a61211"
+      },
+      "answer": {
+        "success": true,
+        "registered": true,
+        "restore": {
+          "restoreId": "restore_vectors_1",
+          "previousDeviceName": "Hallway",
+          "settingsBackup": {
+            "colorScheme": "dark"
+          },
+          "sealed": {
+            "scheme": "ecies-p256",
+            "data": "BAiuG9k5qL3csBPSt4zybB2Y4B79b2OUSCzjxi8iWflUBtfL6+REY9wg1c/BplVFDjb+VmdZqfndnlejdBb31wcwMTIzNDU2Nzg5OjtK0QKFDNe1BCjZVpWunhpPXt1/Kqz4L8DHacQbiqaY3xbYxevfFg=="
+          }
+        }
+      },
+      "inputs": {
+        "oneOffPrivateScalarHex": "b03c2436fbc81642e57b9dd20d78ba01f2fd5fcd63098c93b955faf376523eec",
+        "oneOffPublicKeyUncompressedHex": "0408ae1bd939a8bddcb013d2b78cf26c1d98e01efd6f6394482ce3c62f2259f95406d7cbebe44463dc20d5cfc1a655450e36fe566759a9f9dd9e57a37416f7d707",
+        "nonceHex": "303132333435363738393a3b",
+        "sharedSecretHex": "d1ffa3f16c57f944aaa703f4b5a9d04bb6396bf17e567d8312aa0f236e2681b8",
+        "hkdfInfoHex": "7a656e646f2065636965732d703235362076310408ae1bd939a8bddcb013d2b78cf26c1d98e01efd6f6394482ce3c62f2259f95406d7cbebe44463dc20d5cfc1a655450e36fe566759a9f9dd9e57a37416f7d70704fd76f2e7f5a1301d14dc045a94ee782af2d537ff02d5fa7c75addea413f78a9782ab8120899247c59765c3484eb16dee0c20aefaea6d45d1419fb1bd69db076b",
+        "aesKeyHex": "67169f78bfe2e9b651c9c4f4c18fe91cbefa0136970d6ad2c55abb1c671d1260",
+        "additionalData": "sealed\nprofile_vectors_1\ndevice_vectors_1\nsettingsRestore.get",
+        "plaintext": "{\"adminCode\":\"482915\"}"
+      },
+      "opened": {
+        "adminCode": "482915"
+      },
+      "mergedRestore": {
+        "restoreId": "restore_vectors_1",
+        "previousDeviceName": "Hallway",
+        "settingsBackup": {
+          "colorScheme": "dark"
+        },
+        "adminCode": "482915"
+      },
+      "expect": "accept",
+      "reason": "The hub sealed the restore's admin code to the device's key. Shown in camelCase as on Homey; Home Assistant uses snake_case (admin_code) inside the sealed object, as everywhere else on its side"
+    },
+    {
+      "name": "moved-to-other-method",
+      "kind": "command",
+      "method": "app.lock",
+      "id": "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f",
+      "recipient": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "keyId": "e23e3a73c4a61211"
+      },
+      "params": {
+        "sealed": {
+          "scheme": "ecies-p256",
+          "data": "BLDI3ACQ+cjAAiJmiorWBuV5hLYj2+/jGUDBW+DOW9c9Qo7HJ5GpuaaklVyXovQpyL/tTEy0WRGfPxMDeg7SGvcQERITFBUWFxgZGhueziQ6Ii/FPn7vUQiFKDgy8Q6WfhhkZcOddDtlUaASTCYlxZMGhit/izWTPKiEYDYfvw0K9W4Si4wiQOQvWTuW6SXwtcsWp/vJ+q4qZCrZXm+7AZqQnILypHGn0xZtxebt2kqRQUg1sDkSgfsfEx6Cp5tVWZni2GJ/HiXQy4rQ9aCPzKFVRrH7wY8zqdesql2zHEqpyAtgMHlMaaWcJenymk7GFjAejOAv3FvFIWvDya70tXZhqKxaEPxHkuPoCUnUzics4w=="
+        }
+      },
+      "expect": "refuse",
+      "reason": "The sealed payload from command-with-reply-key, sealed for wifi.configure, delivered in an app.lock command: the additional data doesn't match, so it fails to open"
+    },
+    {
+      "name": "sealed-for-other-device",
+      "kind": "command",
+      "method": "wifi.configure",
+      "id": "9c4d2e1f-0b3a-4d5c-8e7f-6a5b4c3d2e1f",
+      "recipient": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "keyId": "e23e3a73c4a61211"
+      },
+      "params": {
+        "ssid": "Front office",
+        "sealed": {
+          "scheme": "ecies-p256",
+          "data": "BH2Qx8BGvUmDMqnXmj1KYz3YWRd6COavcxwqL8QLre8Uu/KnGCqsIPAnf6QEDJyAsYWUlJ8axpF3c2CzMQk0kq1AQUJDREVGR0hJSksNGchRzQjzrUJ9YupF+Roz12PscKNUMHHCTGKPx2B/lNWYjLGumDPm17fMwven1DgaEw=="
+        }
+      },
+      "inputs": {
+        "oneOffPrivateScalarHex": "e4d6c48f150c07ef509ff7c8d1f25787d76dc1d736c4b3299364eed92cedb1ff",
+        "oneOffPublicKeyUncompressedHex": "047d90c7c046bd498332a9d79a3d4a633dd859177a08e6af731c2a2fc40badef14bbf2a7182aac20f0277fa4040c9c80b18594949f1ac691777360b331093492ad",
+        "nonceHex": "404142434445464748494a4b",
+        "sharedSecretHex": "5e87d84db84ca3b29fb1546e9989cba7a5e92eda5fb7f96f94181c252bc2511e",
+        "hkdfInfoHex": "7a656e646f2065636965732d70323536207631047d90c7c046bd498332a9d79a3d4a633dd859177a08e6af731c2a2fc40badef14bbf2a7182aac20f0277fa4040c9c80b18594949f1ac691777360b331093492ad04fd76f2e7f5a1301d14dc045a94ee782af2d537ff02d5fa7c75addea413f78a9782ab8120899247c59765c3484eb16dee0c20aefaea6d45d1419fb1bd69db076b",
+        "aesKeyHex": "e282984717f31d45b694199a6eb7ffbc6cba92475dd4d7b4bda8d1ee1cfac573",
+        "additionalData": "sealed\nprofile_vectors_1\ndevice_vectors_2\nwifi.configure",
+        "plaintext": "{\"password\":\"not for this device\"}"
+      },
+      "expect": "refuse",
+      "reason": "Sealed with the additional data of another device id (to the same key, to isolate the check), delivered to this device: it fails to open"
+    },
+    {
+      "name": "field-sealed-and-in-clear",
+      "kind": "command",
+      "method": "wifi.configure",
+      "id": "9c4d2e1f-0b3a-4d5c-8e7f-6a5b4c3d2e1f",
+      "recipient": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "keyId": "e23e3a73c4a61211"
+      },
+      "params": {
+        "ssid": "Front office",
+        "password": "clear password",
+        "sealed": {
+          "scheme": "ecies-p256",
+          "data": "BGEWhEAvVLsX/4fAERHohgs3Cq0nybixSu7JsP/XEJ51RQaELF0jqE8yyuS7cjtiE1Dbk7NWLey1RzIBdzUiLL5QUVJTVFVWV1hZWlsB41SOi9uZ0sjFFfrI9fQl5L5qU4M3PdIm9WoQzi3L8xYlEhRSMZV7YpcHr/tg"
+        }
+      },
+      "inputs": {
+        "oneOffPrivateScalarHex": "f008dbc5eb77ded14cf3c231d195f59e113cb3c648352c6c4115fbcf8d6f0d5c",
+        "oneOffPublicKeyUncompressedHex": "04611684402f54bb17ff87c01111e8860b370aad27c9b8b14aeec9b0ffd7109e754506842c5d23a84f32cae4bb723b621350db93b3562decb54732017735222cbe",
+        "nonceHex": "505152535455565758595a5b",
+        "sharedSecretHex": "c658734c761b4253a7162a66394e0e92ad9949cd766fe6718e9147a5bca1db33",
+        "hkdfInfoHex": "7a656e646f2065636965732d7032353620763104611684402f54bb17ff87c01111e8860b370aad27c9b8b14aeec9b0ffd7109e754506842c5d23a84f32cae4bb723b621350db93b3562decb54732017735222cbe04fd76f2e7f5a1301d14dc045a94ee782af2d537ff02d5fa7c75addea413f78a9782ab8120899247c59765c3484eb16dee0c20aefaea6d45d1419fb1bd69db076b",
+        "aesKeyHex": "7cb32a090715c4596ba37a698c9b95bc68f6de074272e5948d2c5a29b9023866",
+        "additionalData": "sealed\nprofile_vectors_1\ndevice_vectors_1\nwifi.configure",
+        "plaintext": "{\"password\":\"sealed password\"}"
+      },
+      "opened": {
+        "password": "sealed password"
+      },
+      "expect": "refuse",
+      "reason": "password is both in clear and in the sealed payload: refused, never merged"
+    },
+    {
+      "name": "encryption-key-get-null",
+      "kind": "answer",
+      "method": "encryptionKey.get",
+      "recipient": {
+        "profileId": "profile_vectors_1",
+        "deviceId": "device_vectors_1",
+        "keyId": "e23e3a73c4a61211"
+      },
+      "answer": {
+        "success": true,
+        "key": null
+      },
+      "expect": "accept",
+      "reason": "No site config key is stored yet: answered in clear with key null, nothing sealed"
+    }
+  ]
+}

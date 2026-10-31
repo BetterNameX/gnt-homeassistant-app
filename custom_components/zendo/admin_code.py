@@ -1,16 +1,16 @@
 """Admin codes of managed devices: the hub's copy, the report command and the
-admin-only services.
+admin-only action.
 
 The device reports its code, or that it has none, whenever it changes and at
 every connection. The hub keeps the last report, so the code can be looked up
-while the device is offline. See docs/managed-devices.md, "Admin Code".
+while the device is offline. ``admin_code_lookup`` and
+``async_send_admin_code`` are shared with the ``zendo/v2/`` admin commands in
+``device_api.py``. See docs/managed-devices.md, "Admin Code".
 
 A code must never reach a log line, an error message, an entity, an attribute,
 a state, an event or ``_serialize_managed_device``. Only its status does: the
 list item and ``bngnt_managed_device_updated`` carry ``admin_code_status``.
-Validation that fails on a code is done in the handlers with fixed messages,
-because a voluptuous schema error, humanized, ends with the value it rejected
-and Home Assistant logs it.
+Validation that fails on a code is done in the handlers with fixed messages.
 """
 
 from __future__ import annotations
@@ -18,28 +18,38 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, callback
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
+from .device_auth import UNKNOWN_ADMIN_CODE_LOOKUP
 from .managed_devices import (
     COMMAND_TIMEOUT,
-    JSONRPC_METHOD_NOT_FOUND,
+    ERROR_APP_UPDATE_REQUIRED,
+    ERROR_COMMAND_FAILED,
+    ERROR_NO_ANSWER,
+    ERROR_NOT_SUPPORTED,
+    ERROR_TARGET_NOT_FOUND,
+    ERROR_TARGET_OFFLINE,
+    BNGntManagedDeviceAppUpdateRequiredError,
     BNGntManagedDeviceCommandError,
+    BNGntManagedDeviceNotLinkedError,
+    BNGntManagedDeviceOfflineError,
     BNGntManagedDeviceRegistry,
     BNGntManagedDeviceTimeoutError,
-    _get_registry,
     _resolve_devices_for_command,
     async_get_ha_device,
 )
+from .v1_rules import V1_REFUSED_RESULT, is_v1_refused
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.managed_device_admin_codes"
@@ -65,6 +75,7 @@ AdminCodeStatus = Literal["set", "not_set", "unknown"]
 _ADMIN_CODE_PATTERN = re.compile(r"[0-9]{4}|[0-9]{6}|[0-9]{8}")
 
 INVALID_ADMIN_CODE_MESSAGE = "The admin code must be exactly 4, 6 or 8 digits."
+INVALID_REPORTED_ADMIN_CODE_MESSAGE = "admin_code must be exactly 4, 6 or 8 digits, or null"
 
 
 def is_valid_admin_code(value: Any) -> bool:
@@ -108,8 +119,7 @@ class BNGntAdminCodeStore:
     """The hub's copy of each managed device's admin code.
 
     Keyed by managed device ID. Kept in its own store, a file only its owner
-    can read, rather than in the config entry's data, which anything that
-    reads the entry would see.
+    can read, rather than in the config entry's data.
 
     No entry for a record: its device hasn't reported (status unknown). An
     entry whose code is None: its device has no admin code (status not_set).
@@ -121,6 +131,7 @@ class BNGntAdminCodeStore:
         )
         self._entries: dict[str, BNGntAdminCodeEntry] = {}
         self._dirty = False
+        self._closed = False
 
     async def async_load(self, managed_device_ids: Iterable[str]) -> None:
         """Load the entries, dropping any whose record is gone."""
@@ -138,12 +149,14 @@ class BNGntAdminCodeStore:
         if len(self._entries) != len(data):
             self._schedule_save()
 
-    async def async_flush(self) -> None:
-        """Write a pending change now.
+    async def async_close(self) -> None:
+        """Write a pending change now, and take no more.
 
-        Called on unload, so that a delayed write can't land after
-        ``async_remove_store`` has removed the file.
+        Called on unload, so that no write, from a call still under way or at
+        Home Assistant's final write, can land after ``async_remove_store`` has
+        removed the file, or over the one the next setup loads.
         """
+        self._closed = True
         if self._dirty:
             await self._store.async_save(self._data_to_save())
 
@@ -181,6 +194,8 @@ class BNGntAdminCodeStore:
 
     @callback
     def _schedule_save(self) -> None:
+        if self._closed:
+            return
         self._dirty = True
         self._store.async_delay_save(self._data_to_save)
 
@@ -198,10 +213,9 @@ async def async_remove_store(hass: HomeAssistant) -> None:
 # ---------------------------------------------------------------------------
 # WebSocket command -- device-facing (called by the app)
 #
-# A command rather than a service: every service call fires a ``call_service``
-# event with its data, which the recorder keeps, so each code a device reported
-# would be recorded. Not admin-only, like update_managed_device_state, since the
-# app may sign in as a user who isn't an administrator.
+# A command, never a service, so a report fires no ``call_service`` event. Not
+# admin-only, like update_managed_device_state, since the app may sign in as a
+# user who isn't an administrator.
 # ---------------------------------------------------------------------------
 
 @websocket_api.websocket_command(
@@ -211,8 +225,7 @@ async def async_remove_store(hass: HomeAssistant) -> None:
                 vol.Required("type"): WS_TYPE_REPORT_ADMIN_CODE,
                 vol.Required("profile_id"): vol.All(cv.string, vol.Length(min=1)),
                 vol.Required("device_id"): vol.All(cv.string, vol.Length(min=1)),
-                # Any value, checked in the handler: a schema error would put
-                # the value in the error and the log.
+                # Any value, checked in the handler with a fixed message.
                 vol.Required("admin_code"): object,
             },
             extra=vol.REMOVE_EXTRA,
@@ -242,70 +255,129 @@ def ws_report_managed_device_admin_code(
         )
         return
 
+    if is_v1_refused(
+        hass, WS_TYPE_REPORT_ADMIN_CODE, (msg["profile_id"], msg["device_id"])
+    ):
+        connection.send_result(msg["id"], dict(V1_REFUSED_RESULT))
+        return
+
     code = msg["admin_code"]
     if code is not None and not is_valid_admin_code(code):
         connection.send_error(
-            msg["id"],
-            websocket_api.ERR_INVALID_FORMAT,
-            "admin_code must be exactly 4, 6 or 8 digits, or null",
+            msg["id"], websocket_api.ERR_INVALID_FORMAT, INVALID_REPORTED_ADMIN_CODE_MESSAGE
         )
         return
 
-    key = registry.find_key(msg["profile_id"], msg["device_id"])
+    connection.send_result(
+        msg["id"],
+        report_admin_code(registry, msg["profile_id"], msg["device_id"], code),
+    )
+
+
+def report_admin_code(
+    registry: BNGntManagedDeviceRegistry,
+    profile_id: str,
+    device_id: str,
+    code: str | None,
+) -> dict[str, Any]:
+    """Keep a checked admin code, or None, for the device's record.
+
+    Keeps nothing when no record has the device attached.
+    """
+    key = registry.find_key(profile_id, device_id)
     if key is not None:
         registry.report_admin_code(key, code)
+    return {"success": True, "registered": key is not None}
 
-    connection.send_result(msg["id"], {"success": True, "registered": key is not None})
+
+def admin_code_lookup(
+    registry: BNGntManagedDeviceRegistry, key: str
+) -> dict[str, Any] | None:
+    """Return the last admin code the record's device reported, or None for no record.
+
+    ``{"status", "admin_code", "reported_at"}``, read only from the store, so
+    it works while the device is offline. With no report, the status is
+    unknown, and the code and ``reported_at`` are None.
+    """
+    if registry.get_device(key) is None:
+        return None
+    entry = registry.admin_codes.get(key)
+    if entry is None:
+        return dict(UNKNOWN_ADMIN_CODE_LOOKUP)
+    return {
+        "status": admin_code_status(entry),
+        "admin_code": entry["code"],
+        "reported_at": entry["reported_at"],
+    }
+
+
+@dataclass(frozen=True)
+class AdminCodeFailure:
+    """Why a device didn't take ``adminCode.set``."""
+
+    # The code ``zendo/v2/configure_managed_device_admin_code`` answers with.
+    error: str
+    # What ``managed_device_admin_code_configure``'s error says after the
+    # device's name. Never the device's own message.
+    reason: str
+
+
+async def async_send_admin_code(
+    registry: BNGntManagedDeviceRegistry, key: str, code: str | None
+) -> AdminCodeFailure | None:
+    """Send the record's device a checked code (None removes it).
+
+    Waits for its answer, up to ``COMMAND_TIMEOUT`` seconds. Returns why it
+    didn't take, or None when the device answered success.
+
+    Raises ``BNGntManagedDeviceNotLinkedError`` on a Home Assistant that isn't
+    linked, which is about no one device. The ``zendo/v2/`` admin commands never
+    get it, since they answer ``not_linked`` before they get here.
+    """
+    if registry.get_device(key) is None:
+        return AdminCodeFailure(ERROR_TARGET_NOT_FOUND, "it's no longer a managed device")
+
+    try:
+        await registry.send_command(key, ADMIN_CODE_METHOD, {"code": code})
+    except BNGntManagedDeviceNotLinkedError:
+        raise
+    except BNGntManagedDeviceOfflineError:
+        return AdminCodeFailure(ERROR_TARGET_OFFLINE, "it's offline")
+    except BNGntManagedDeviceTimeoutError:
+        return AdminCodeFailure(
+            ERROR_NO_ANSWER,
+            f"it didn't answer within {COMMAND_TIMEOUT} seconds. Check its "
+            "admin code in the Zendo app to see whether it changed",
+        )
+    except BNGntManagedDeviceCommandError as err:
+        return AdminCodeFailure(
+            ERROR_NOT_SUPPORTED if err.code == JSONRPC_NOT_SUPPORTED else ERROR_COMMAND_FAILED,
+            _command_error_reason(err.code, removing=code is None),
+        )
+    except BNGntManagedDeviceAppUpdateRequiredError:
+        # It answered Method not found, or it hasn't registered and was sent
+        # nothing.
+        return AdminCodeFailure(
+            ERROR_APP_UPDATE_REQUIRED, "it needs a newer version of the Zendo app"
+        )
+    except HomeAssistantError as err:
+        # The command couldn't be sent, or the integration unloaded before the
+        # answer. send_command's own messages never carry the params.
+        return AdminCodeFailure(ERROR_NO_ANSWER, str(err))
+    return None
 
 
 # ---------------------------------------------------------------------------
 # Services -- automation-facing, admin only
 # ---------------------------------------------------------------------------
 
-def _one_device(value: Any) -> str:
-    if isinstance(value, list):
-        if len(value) != 1:
-            raise vol.Invalid("Select one device")
-        value = value[0]
-    return cv.string(value)
-
-
-SERVICE_MANAGED_DEVICE_ADMIN_CODE_GET_SCHEMA = vol.Schema(
-    {vol.Required("device"): _one_device},
-)
-
 _CONFIGURE_FIELDS = ("device", "code", "remove")
 
-# Every field is checked in the handler. If this schema rejected a call, Home
-# Assistant would log the call's data, code included, at debug level, and the
-# error could end with the value it rejected.
+# Every field is checked in the handler, with a fixed message.
 SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE_SCHEMA = vol.Schema(
     {vol.Optional(field): object for field in _CONFIGURE_FIELDS},
     extra=vol.ALLOW_EXTRA,
 )
-
-
-async def handle_managed_device_admin_code_get(
-    hass: HomeAssistant, call: ServiceCall
-) -> ServiceResponse:
-    """Return the last admin code the device reported. Works offline."""
-    registry = _get_registry(hass)
-    key = registry.resolve_ha_device_to_key(call.data["device"])
-    if key is None:
-        raise ServiceValidationError(
-            "The selected device isn't a managed Zendo device. "
-            "Please select one Zendo device."
-        )
-
-    entry = registry.admin_codes.get(key)
-    if entry is None:
-        return {"status": STATUS_UNKNOWN, "admin_code": None, "reported_at": None}
-
-    return {
-        "status": admin_code_status(entry),
-        "admin_code": entry["code"],
-        "reported_at": entry["reported_at"],
-    }
 
 
 def _code_from_call(call: ServiceCall) -> str | None:
@@ -386,37 +458,6 @@ def _command_error_reason(code: Any, removing: bool) -> str:
     return f"it answered with error {code}"
 
 
-async def _send_admin_code(
-    registry: BNGntManagedDeviceRegistry, key: str, code: str | None
-) -> str | None:
-    """Send the code (None removes it). Returns why it failed, or None."""
-    device = registry.get_device(key)
-    if device is None:
-        return "it's no longer a managed device"
-    if not device["online"]:
-        return "it's offline"
-
-    try:
-        await registry.send_command(key, ADMIN_CODE_METHOD, {"code": code})
-    except BNGntManagedDeviceTimeoutError:
-        return (
-            f"it didn't answer within {COMMAND_TIMEOUT} seconds. Look up its "
-            "admin code to see whether it changed"
-        )
-    except BNGntManagedDeviceCommandError as err:
-        return _command_error_reason(err.code, removing=code is None)
-    except HomeAssistantError as err:
-        cause = err.__cause__
-        if (
-            isinstance(cause, BNGntManagedDeviceCommandError)
-            and cause.code == JSONRPC_METHOD_NOT_FOUND
-        ):
-            return "it needs a newer version of the Zendo app"
-        # send_command's own messages, which never carry the params.
-        return str(err)
-    return None
-
-
 def _failure_message(
     removing: bool, failures: list[tuple[str, str]], total: int
 ) -> str:
@@ -449,19 +490,22 @@ async def handle_managed_device_admin_code_configure(
     A device that answers success keeps it, whatever the others do, and has
     already reported it: the app reports before it answers. The call then
     fails naming the devices that didn't take it, and why.
+
+    On a Home Assistant that isn't linked, no device can take it, so the error
+    says that once instead of naming each device.
     """
     code = _code_from_call(call)
     registry, keys = _resolve_devices_for_command(hass, call)
     keys = list(dict.fromkeys(keys))
 
-    reasons = await asyncio.gather(
-        *(_send_admin_code(registry, key, code) for key in keys)
+    outcomes = await asyncio.gather(
+        *(async_send_admin_code(registry, key, code) for key in keys)
     )
 
     failures = [
-        (_device_label(hass, registry, key), reason)
-        for key, reason in zip(keys, reasons, strict=True)
-        if reason is not None
+        (_device_label(hass, registry, key), failure.reason)
+        for key, failure in zip(keys, outcomes, strict=True)
+        if failure is not None
     ]
     if failures:
         raise HomeAssistantError(_failure_message(code is None, failures, len(keys)))
