@@ -343,6 +343,7 @@ class EnvelopeTest(unittest.TestCase):
             _vector_registration(),
             one_off_key=_one_off_key(inputs["oneOffPrivateScalarHex"]),
             nonce=bytes.fromhex(inputs["nonceHex"]),
+            padded=False,
         )
         expected = vector["envelope"]
         self.assertEqual(envelope["profile_id"], expected["profileId"])
@@ -1289,14 +1290,21 @@ class SealedPaddingTest(unittest.TestCase):
         opened = self._open(self._seal(_SHORT_SECRET, padded=False))
         self.assertEqual(opened, device_auth._json_bytes(_SHORT_SECRET))
 
-    def test_an_envelope_holds_the_json_alone(self):
-        request = {"jsonrpc": "2.0", "method": "app.lock", "params": {"pin": "1234"}, "id": "x"}
-        envelope = device_auth.build_command_envelope(request, _vector_registration())
-        json_bytes = device_auth._json_bytes(request)
-        self.assertEqual(
-            len(base64.b64decode(envelope["payload"], validate=True)),
-            self.AROUND_PAYLOAD_BYTES + len(json_bytes),
-        )
+
+class EnvelopePaddingTest(unittest.TestCase):
+    """An encrypted envelope's JSON is padded to a multiple of 512 bytes, one in clear isn't."""
+
+    RPC_ID = "3b8e1f0c-7d2a-4c6b-9e5f-0a1b2c3d4e5f"
+    # What ``payload`` holds around what's encrypted: the one-off key, the nonce and the tag.
+    AROUND_PAYLOAD_BYTES = 65 + 12 + 16
+
+    def _request(self, method, params):
+        return {"jsonrpc": "2.0", "method": method, "params": params, "id": self.RPC_ID}
+
+    def _envelope(self, request, **kwargs):
+        return device_auth.build_command_envelope(request, _vector_registration(), **kwargs)
+
+    def _open(self, envelope):
         aad = device_auth.additional_data(
             envelope["profile_id"],
             envelope["device_id"],
@@ -1304,9 +1312,68 @@ class SealedPaddingTest(unittest.TestCase):
             envelope["encryption"],
             envelope["key_id"],
         )
-        self.assertEqual(
-            device_auth.ecies_decrypt(_device_private_key(), aad, envelope["payload"]), json_bytes
+        return device_auth.ecies_decrypt(_device_private_key(), aad, envelope["payload"])
+
+    def test_a_short_command_fills_one_block(self):
+        payload = self._envelope(self._request("app.lock", {"pin": "1234"}))["payload"]
+        self.assertEqual(len(base64.b64decode(payload, validate=True)), 605)
+        self.assertEqual(len(payload), 808)
+
+    def test_every_code_and_pin_and_a_removal_come_out_the_same_size(self):
+        requests = {"adminCode.set, null": self._request("adminCode.set", {"code": None})}
+        for digits in ("1234", "123456", "12345678"):
+            requests[f"adminCode.set, {digits}"] = self._request("adminCode.set", {"code": digits})
+            requests[f"app.lock, {digits}"] = self._request("app.lock", {"pin": digits})
+        for name, request in requests.items():
+            with self.subTest(name):
+                self.assertEqual(len(self._envelope(request)["payload"]), 808)
+
+    def test_it_opens_to_the_request_with_the_additional_data_unchanged(self):
+        vector = _envelope_vector("ecies-p256")
+        envelope = self._envelope(vector["request"])
+        for field, expected in (
+            ("profile_id", vector["envelope"]["profileId"]),
+            ("device_id", vector["envelope"]["deviceId"]),
+            ("id", vector["envelope"]["id"]),
+            ("encryption", vector["envelope"]["encryption"]),
+            ("key_id", vector["envelope"]["keyId"]),
+        ):
+            self.assertEqual(envelope[field], expected)
+        opened = device_auth.ecies_decrypt(
+            _device_private_key(),
+            vector["inputs"]["additionalData"].encode(),
+            envelope["payload"],
         )
+        json_bytes = vector["inputs"]["plaintext"].encode()
+        self.assertEqual(opened, json_bytes + b" " * (512 - len(json_bytes)))
+        self.assertEqual(json.loads(opened.decode()), vector["request"])
+
+    def test_a_command_over_one_block_takes_another(self):
+        request = self._request("adminCode.set", {"code": "1" * 600})
+        envelope = self._envelope(request)
+        self.assertEqual(
+            len(base64.b64decode(envelope["payload"], validate=True)),
+            self.AROUND_PAYLOAD_BYTES + 1024,
+        )
+        self.assertEqual(json.loads(self._open(envelope).decode()), request)
+
+    def test_with_padding_off_it_encrypts_the_json_alone(self):
+        request = self._request("app.lock", {"pin": "1234"})
+        self.assertEqual(
+            self._open(self._envelope(request, padded=False)), device_auth._json_bytes(request)
+        )
+
+    def test_an_envelope_in_clear_is_unchanged(self):
+        request = self._request("screen.wakeUp", {})
+        expected = {
+            "profile_id": "profile_vectors_1",
+            "device_id": "device_vectors_1",
+            "id": self.RPC_ID,
+            "encryption": "none",
+            "payload": request,
+        }
+        self.assertEqual(self._envelope(request), expected)
+        self.assertEqual(self._envelope(request, padded=False), expected)
 
 
 if __name__ == "__main__":

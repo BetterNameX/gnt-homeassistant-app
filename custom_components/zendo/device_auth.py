@@ -22,8 +22,10 @@ docs/managed-devices.md, "Device Registration (v2)".
 - **A sealed object** (``{"scheme": "ecies-p256", "data": ...}``) carries
   some of a message's fields encrypted to the device's public key, the rest of
   the message staying in clear: a registered device's key, or the key in the
-  token of an admin's call. Its JSON gets trailing spaces, which JSON parsers
-  ignore, up to a multiple of 512 bytes.
+  token of an admin's call.
+- **Padding:** before it's encrypted, the JSON of an encrypted envelope or a
+  sealed object gets trailing spaces, which JSON parsers ignore, up to a
+  multiple of 512 bytes.
 - **The site config encryption key** held is the stored one, otherwise the one
   in the ``input_text`` helper's state, otherwise none.
 """
@@ -75,8 +77,8 @@ SEALED_METHOD_SETTINGS_RESTORE = "settingsRestore.get"
 SEALED_METHOD_ADMIN_CODE_GET = "adminCode.get"
 SEALED_METHOD_ENCRYPTION_KEY_GET = "encryptionKey.get"
 
-# A sealed object's padded JSON is a multiple of this. The app pads to the same
-# size, so keep the two in sync.
+# The padded JSON of a sealed object or an encrypted envelope is a multiple of
+# this. The app pads to the same size, so keep the two in sync.
 SEALED_PAYLOAD_BLOCK_BYTES = 512
 
 # An admin's lookup of an admin code when there's none to hand out, before it's
@@ -895,12 +897,16 @@ def build_command_envelope(
     *,
     one_off_key: ec.EllipticCurvePrivateKey | None = None,
     nonce: bytes | None = None,
+    padded: bool = True,
 ) -> dict[str, Any]:
     """Wrap a JSON-RPC request for a registered device.
 
     A method in ``MUST_ENCRYPT_METHODS`` is encrypted to the device's public
-    key, and anything else goes in clear. A ``sealed`` object already in the
-    request's params goes as it is.
+    key, its JSON padded first (``_pad_to_block``), and anything else goes in
+    clear, as an object. A ``sealed`` object already in the request's params
+    goes as it is. ``one_off_key`` and ``nonce`` are for tests, and ``padded``
+    for the tests against the shared vectors, which hold the JSON alone: leave
+    them out.
     """
     rpc_id = request["id"]
     envelope: dict[str, Any] = {
@@ -923,10 +929,11 @@ def build_command_envelope(
     )
     envelope["encryption"] = registration.scheme
     envelope["key_id"] = registration.key_id
+    json_bytes = _json_bytes(request)
     envelope["payload"] = ecies_encrypt(
         registration.encryption_public_key(),
         aad,
-        _json_bytes(request),
+        _pad_to_block(json_bytes) if padded else json_bytes,
         one_off_key=one_off_key,
         nonce=nonce,
     )
