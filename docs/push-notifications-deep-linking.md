@@ -227,7 +227,7 @@ automation:
           deep_link_destination: "securitySystem_ghi789"
 ```
 
-`interruption_level` accepts `time_sensitive` or `critical`. Use `time_sensitive` instead if the alert shouldn't break through Do Not Disturb.
+`interruption_level` accepts `quiet`, `time_sensitive` or `critical`. Use `time_sensitive` instead if the alert shouldn't break through Do Not Disturb. Use `quiet` for things people don't need to know immediately, such as a low battery or a filter to change: it goes straight to the notification list with no sound and no pop-up.
 
 ### What Happens
 

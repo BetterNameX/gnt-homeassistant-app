@@ -189,7 +189,9 @@ SERVICE_SEND_NOTIFICATION_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_ENTITY_ID): cv.entity_ids,
         vol.Required("message"): vol.All(cv.string, vol.Length(min=1)),
-        vol.Optional("interruption_level"): vol.In(["time_sensitive", "critical"]),
+        vol.Optional("interruption_level"): vol.In(
+            ["quiet", "time_sensitive", "critical"]
+        ),
         vol.Optional("deep_link_destination"): cv.string,
     },
     extra=vol.REMOVE_EXTRA,
@@ -267,6 +269,8 @@ def _build_notification(
         notification["interruptionLevel"] = "TIME_SENSITIVE"
     elif interruption_level == "critical":
         notification["interruptionLevel"] = "CRITICAL"
+    elif interruption_level == "quiet":
+        notification["interruptionLevel"] = "QUIET"
 
     if deep_link_uri:
         notification["linking"] = {

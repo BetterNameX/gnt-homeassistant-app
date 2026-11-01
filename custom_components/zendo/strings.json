@@ -78,7 +78,7 @@
         },
         "interruption_level": {
           "name": "Interruption level",
-          "description": "Optional. Set to \"time_sensitive\" for time-sensitive notifications or \"critical\" for critical alerts that bypass Do Not Disturb."
+          "description": "Optional. Set to \"quiet\" for things people don't need to know immediately, such as a low battery or a filter to change: it goes straight to the notification list with no sound and no pop-up. Set to \"time_sensitive\" for time-sensitive notifications or \"critical\" for critical alerts that bypass Do Not Disturb."
         },
         "deep_link_destination": {
           "name": "Deep link destination",
