@@ -33,7 +33,9 @@ Read these files for project details:
   subscriptions, command envelopes (a PIN or an admin code only ever goes to a registered
   device), the site config encryption key (its private store, which key is held, from
   the store or the `input_text` helper, and `zendo/v2/get_encryption_key` and
-  `zendo/v2/claim_encryption_key`), revoking, the v1 calls older apps still have, those
+  `zendo/v2/claim_encryption_key`), calling a device (`zendo/v2/call_device` and
+  `zendo/v2/device_call_update`, the `bngnt_device_call` and `bngnt_device_call_update`
+  events, their limits and the calls in progress), revoking, the v1 calls older apps still have, those
   2.0.0 removed and the rules for the rest, the registrations store, and the tests against
   the shared vectors), moving to another property or starting over (removing the
   integration: what it removes, what comes back by itself and what an admin redoes), the

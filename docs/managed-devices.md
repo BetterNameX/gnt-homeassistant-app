@@ -44,6 +44,7 @@ Every offline record has an `offline_reason`. It is `null` while the record is o
 
 - The reason is a plain string on the wire, not an enum, so a hub can add one without an app release. The registry only writes the values in `OFFLINE_REASONS`, and the app and the Homey app know the same values. Keep the three in sync.
 - `unregister_managed_device` records `unregistered` even when the record has already timed out, so a device whose Always-On Display was turned off after it lost its connection reads as not monitored rather than lost.
+- `zendo/v2/call_device` answers `target_offline` for every offline record except one with `unregistered`, whose device can still be connected. See [`zendo/v2/call_device`](#zendov2call_device).
 - After a restart, a record comes back with the reason it was persisted with. A record that was online when Home Assistant stopped has no reason, and nor does one persisted by an older version: both come back as `timeout`, as does any value the integration doesn't know.
 
 ---
@@ -912,6 +913,7 @@ Each command takes its credential as a field, `api_key` or `device_control_backe
 | `zendo/v2/complete_managed_device_settings_restore` | `api_key`, `restore_id` | API key | `{success: true, registered, completed}` (see [Settings Backup](#settings-backup)) |
 | `zendo/v2/doorbell_action` | `api_key`, `event_id`, optional `action` | API key | `{success: true}`, and `bngnt_doorbell_action` fires as for `doorbell_action` |
 | `zendo/v2/get_encryption_key` | `api_key` | API key | `{success: true, sealed}`, with `key` in the sealed object, or `{success: true, key: null}` when no key is held (see [The Site Config Encryption Key](#the-site-config-encryption-key)) |
+| `zendo/v2/device_call_update` | `api_key`, `call_id`, and either `event` with optional `data`, or `response` | API key | `{success: true}` or `{success: false, error}` (see [Calling a Device](#calling-a-device)) |
 | `zendo/v2/revoke_device` | `api_key`, or `device_control_backend_token`, `profile_id` and `device_id` | API key to leave the site, or an admin-scoped token | `{success: true}` |
 | `zendo/v2/subscribe_managed_device_changes` | `device_control_backend_token` | Admin-scoped token | A subscription |
 | `zendo/v2/setup_status` | `device_control_backend_token` | Admin-scoped token, which needs no registration | `{success: true, version, link, push_token_serial}` (see [`zendo/v2/setup_status`](#zendov2setup_status)) |
@@ -924,6 +926,7 @@ Each command takes its credential as a field, `api_key` or `device_control_backe
 | `zendo/v2/set_deep_link_destinations` | `device_control_backend_token`, `destinations` (a list, or a JSON-stringified one) | Admin-scoped token | `{success: true}` |
 | `zendo/v2/notify_site_config_manifest_update` | `device_control_backend_token`, `payload` | Admin-scoped token | `{success: true}`, and `bngnt_site_config_manifest_updated` fires |
 | `zendo/v2/claim_encryption_key` | `device_control_backend_token`, `key` | Admin-scoped token | `{success: true, sealed}`, with the key it keeps as `key` in the sealed object, or `{success: false, error}` (see [The Site Config Encryption Key](#the-site-config-encryption-key)) |
+| `zendo/v2/call_device` | `device_control_backend_token`, `call_id`, `profile_id`, `device_id`, `method`, optional `params`, `timeout_seconds` | Admin-scoped token | `{success: true}` or `{success: false, error}` (see [Calling a Device](#calling-a-device)) |
 
 An admin-scoped token counts only for a device that has registered, except for `zendo/v2/setup_status`, and `zendo/v2/set_up` on a Home Assistant that isn't linked.
 
@@ -945,6 +948,7 @@ After an unload, each command answers the error `not_set_up`, since a WebSocket 
 
 - **`zendo/v2/subscribe_events`** sends each event as `{"event_type": <name>, "data": <data>}`, like Home Assistant's own `subscribe_events`:
   - `bngnt_managed_device_command`, for a registered device: a command envelope (see [Command Envelopes](#command-envelopes));
+  - `bngnt_device_call` and `bngnt_device_call_update`: encrypted envelopes (see [Calling a Device](#calling-a-device));
   - `bngnt_device_deleted`, `{profile_id, device_id}`, when a device is revoked;
   - `bngnt_subscriptions_ended`, when the integration unloads (see below);
   - forwarded from the bus: `bngnt_site_config_manifest_updated`, `bngnt_doorbell_ring`, `bngnt_doorbell_action` and `bngnt_managed_device_replaced`.
@@ -1054,6 +1058,101 @@ It takes an admin-scoped token, as the other admin calls do. The answer is `{"su
 - its managed device, if it has one, goes offline with the reason `unregistered`, so automations still point at it and a replacement can take it over;
 - every long-lived token labelled for it is removed a second later, for any Home Assistant user, which closes its connections. The wait lets `bngnt_device_deleted` go out first. The label is the `bngnt1:` the app puts at the end of the token's name, with the site, profile and device. A device leaving the site also gets its answer first: its own token is removed a second after the answer.
 
+### Calling a Device
+
+An admin's device can send a command to any registered device, with or without a managed device record, and hear back through the subscriptions. These calls are separate from the commands the automation services send (see [Automation Services](#automation-services)): a service can't start one.
+
+Every call is asynchronous. Starting one answers at once, and everything after that arrives as an event:
+
+| Step | Call or event | Credential or encryption |
+|---|---|---|
+| The admin's device starts a call | `zendo/v2/call_device` | Admin-scoped token |
+| The command goes to the target | `bngnt_device_call` | Encrypted to the target |
+| The target sends an event or its answer | `zendo/v2/device_call_update` | The target's API key |
+| That goes to the caller | `bngnt_device_call_update` | Encrypted to the caller |
+
+The integration checks the fields' types and lengths and the limits below, and reads nothing else in `method`, `params`, `event`, `data` or `response`. It has no list of methods, so adding or changing a command needs only a Zendo app release, on the admin's device and on the target. The Homey app has the same calls, events and limits, with camelCase fields outside the encryption: keep the two in sync.
+
+#### `zendo/v2/call_device`
+
+```json
+{"id": 49, "type": "zendo/v2/call_device", "device_control_backend_token": "<device control backend token>", "call_id": "<a UUID>", "profile_id": "profileId123", "device_id": "deviceId456", "method": "<method>", "params": {}, "timeout_seconds": 130}
+```
+
+The answer is `{"success": true}` once the command has gone out, or `{"success": false, "error": <code>}`.
+
+| Field | Value |
+|---|---|
+| `call_id` | A non-empty string of at most 128 characters, which the app picks. |
+| `profile_id`, `device_id` | The target. The caller's own ids come from its token. |
+| `method` | A non-empty string of at most 255 characters. |
+| `params` | Optional. An object. `null` counts as not given. |
+| `timeout_seconds` | A positive number. |
+
+Each takes any value in the schema, and the handler checks it. One that isn't valid fails with `invalid_format` and the fixed message `Invalid <field>`. The token is checked first, as on every admin call, then the fields, then these, in this order:
+
+| Error code | When |
+|---|---|
+| `not_linked`, `invalid_token`, `wrong_site`, `not_admin`, `unknown_api_key`, `device_revoked` | About the caller, as on every admin call. |
+| `target_revoked` | The target's ids have a tombstone. |
+| `target_not_registered` | No registration has the target's ids. |
+| `target_offline` | The target has a managed device record that's offline with an `offline_reason` other than `unregistered`, or with none. A device that unregistered sends no heartbeat but can still be connected, so its call goes ahead, as does a target with no record. If nothing answers, the app's timer decides. |
+| `call_id_in_use` | Another call in progress has this `call_id`, from any caller. |
+| `timeout_too_long` | `timeout_seconds` is over 600. |
+| `too_large` | `params` is over 64 KiB (65536 bytes), as the UTF-8 of its compact JSON. |
+
+The app reads `device_revoked` and `unknown_api_key` as being about itself, so an answer about the target never uses them. A token check that spans an unload answers the error `not_set_up`.
+
+#### `bngnt_device_call`
+
+The command goes to every `zendo/v2/subscribe_events` subscription, and never on the bus, in the envelope of [Command Envelopes](#command-envelopes), addressed to the target with `call_id` as its id, and always encrypted to the target's public key, whatever the method:
+
+```json
+{"profile_id": "profileId123", "device_id": "deviceId456", "id": "<call_id>", "encryption": "ecies-p256", "key_id": "e23e3a73c4a61211", "payload": "<base64>"}
+```
+
+`payload` opens to the JSON-RPC request, with `params` as `{}` when the call had none. Each device reads only the ones with its own ids.
+
+```json
+{"jsonrpc": "2.0", "id": "<call_id>", "method": "<method>", "params": {}, "timeoutSeconds": 130}
+```
+
+Commands aren't queued: a device that isn't subscribed doesn't get it.
+
+#### `zendo/v2/device_call_update`
+
+The target sends each event, and its final answer, with its API key:
+
+```json
+{"id": 50, "type": "zendo/v2/device_call_update", "api_key": "<API key>", "call_id": "<call_id>", "event": "<event>", "data": {}}
+{"id": 51, "type": "zendo/v2/device_call_update", "api_key": "<API key>", "call_id": "<call_id>", "response": {"jsonrpc": "2.0", "id": "<call_id>", "result": {}}}
+```
+
+The answer is `{"success": true}`, or `{"success": false, "error": <code>}`.
+
+- **An update has either `event`, with optional `data`, or `response`.** `call_id` is checked as in `zendo/v2/call_device`, `event` is a non-empty string of at most 255 characters, and `data` and `response` are objects. `null` counts as not given. Anything else fails with `invalid_format` and the fixed message `Invalid <field>`: `Invalid event` with no `event` and no `response`, or with both, and `Invalid data` with `data` and `response`.
+- **Calls are matched by `call_id` and the sender's registration, not by connection,** so a device that reconnects, or registers again, carries on with the same call.
+- **A `response` ends the call.** It's passed on as it came, with any `error.data`. It doesn't go through the path `zendo/v2/managed_device_command_response` takes.
+
+| Error code | When |
+|---|---|
+| `unknown_api_key` | No registration has that API key: the sender's own, as on every call with one. |
+| `call_not_found` | No call in progress has this `call_id` with the sender as its target, or the caller's registration has gone, which ends the call. The device stops the handler. |
+| `too_large` | `data` or `response` is over 64 KiB, measured as for `params`. The call stays open. |
+
+#### `bngnt_device_call_update`
+
+Each update goes to every `zendo/v2/subscribe_events` subscription, and never on the bus, in an envelope addressed to the caller with `call_id` as its id, always encrypted to the public key in the caller's registration as it is at that moment, so a caller that registers again keeps receiving them. Each device reads only the ones with its own ids. `payload` opens to one of these, where `profileId` and `deviceId` name the target, and `data` is `{}` when the update had none:
+
+```json
+{"callId": "<call_id>", "profileId": "profileId123", "deviceId": "deviceId456", "event": "<event>", "data": {}}
+{"callId": "<call_id>", "profileId": "profileId123", "deviceId": "deviceId456", "response": {"jsonrpc": "2.0", "id": "<call_id>", "result": {}}}
+```
+
+#### The Calls in Progress
+
+`DeviceCallTable` in `device_auth.py` keeps each call in memory only: its id, the caller's ids, the target's ids and its deadline, a Home Assistant loop timer of `timeout_seconds`. A call ends on the target's `response`, at its deadline, or when an update finds the caller's registration has gone. An unload clears the table and cancels the timers, and a restart loses it, after which an update answers `call_not_found`. No event goes out when a call ends this way: the app keeps its own timers. The device receives the same timeout as `timeoutSeconds`.
+
 ### Older Apps (v1)
 
 From 2.0.0, these v1 calls stay for devices on an older app while they move to v2:
@@ -1112,7 +1211,7 @@ The automation services, `send_notification`, `ring_doorbell`, `refresh_profiles
 
 ### Tests
 
-`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device`, what an admin's lookup answers for a device that hasn't registered, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
+`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device`, what an admin's lookup answers for a device that hasn't registered, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
 
 ```sh
 python3 -m unittest discover -s tests -v

@@ -119,7 +119,12 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import CONF_MANAGED_DEVICES, DOMAIN, SERVICE_DEVICE_IDENTIFIER
-from .device_auth import CommandRefusal, command_refusal
+from .device_auth import (
+    OFFLINE_REASON_UNREGISTERED,
+    CommandRefusal,
+    command_refusal,
+    lost_contact,
+)
 from .v1_rules import V1_REFUSED_RESULT, is_v1_refused, raise_if_v1_refused
 
 if TYPE_CHECKING:
@@ -152,7 +157,6 @@ ERROR_COMMAND_FAILED = "command_failed"
 # reason without an app release. The registry only writes these, and the app
 # and the Homey app know the same ones, so keep all three in sync.
 OFFLINE_REASON_TIMEOUT = "timeout"
-OFFLINE_REASON_UNREGISTERED = "unregistered"
 OFFLINE_REASONS = (OFFLINE_REASON_TIMEOUT, OFFLINE_REASON_UNREGISTERED)
 
 OfflineReason = Literal["timeout", "unregistered"]
@@ -816,6 +820,14 @@ class BNGntManagedDeviceRegistry:
     def find_key(self, profile_id: str, device_id: str) -> str | None:
         """Return the managed device ID the device is attached to, if any."""
         return self._find_key(profile_id, device_id)
+
+    def has_lost_contact(self, profile_id: str, device_id: str) -> bool:
+        """Return whether the device is attached to a record that lost contact with it."""
+        key = self._find_key(profile_id, device_id)
+        if key is None:
+            return False
+        device = self._devices[key]
+        return lost_contact(online=device["online"], offline_reason=device.get("offline_reason"))
 
     def serialize(self, key: str) -> dict[str, Any]:
         """Return the record as ``zendo/v2/list_managed_devices`` lists it."""

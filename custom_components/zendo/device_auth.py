@@ -26,6 +26,11 @@ docs/managed-devices.md, "Device Registration (v2)".
 - **Padding:** before it's encrypted, the JSON of an encrypted envelope or a
   sealed object gets trailing spaces, which JSON parsers ignore, up to a
   multiple of 512 bytes.
+- **A device call** carries a command from an admin's device to a registered
+  device, and the events and answer that come back, always in encrypted
+  envelopes. ``DeviceCallTable`` keeps the calls in progress. Beyond the type
+  and length checks here, a call's method, params, event, data and response
+  aren't read.
 - **The site config encryption key** held is the stored one, otherwise the one
   in the ``input_text`` helper's state, otherwise none.
 """
@@ -106,12 +111,26 @@ ERROR_PUBLIC_KEY_REQUIRED = "public_key_required"
 ERROR_INVALID_PUSH_TOKEN = "invalid_push_token"
 # A v1 call the v1 rules refuse (v1_rules.py).
 ERROR_V2_REQUIRED = "v2_required"
+# zendo/v2/call_device and zendo/v2/device_call_update, about the call or its
+# target. The app reads ``device_revoked`` and ``unknown_api_key`` as being about
+# itself, so nothing about a target answers with those.
+ERROR_TARGET_NOT_REGISTERED = "target_not_registered"
+ERROR_TARGET_REVOKED = "target_revoked"
+ERROR_TARGET_OFFLINE = "target_offline"
+ERROR_CALL_ID_IN_USE = "call_id_in_use"
+ERROR_TIMEOUT_TOO_LONG = "timeout_too_long"
+ERROR_TOO_LARGE = "too_large"
+ERROR_CALL_NOT_FOUND = "call_not_found"
 
 # The ``link`` of zendo/v2/setup_status and zendo/v2/set_up. The app and the
 # Homey app use the same strings, so keep all three in sync.
 LINK_THIS_PROPERTY = "this_property"
 LINK_ANOTHER_PROPERTY = "another_property"
 LINK_NOT_LINKED = "not_linked"
+
+# The ``offline_reason`` of a managed device record whose device unregistered.
+# managed_devices.py has the other reasons.
+OFFLINE_REASON_UNREGISTERED = "unregistered"
 
 # The label the Zendo app puts at the end of each long-lived token's client
 # name: ``bngnt1:`` and a JSON object with the site (``s``), profile (``p``) and
@@ -901,25 +920,41 @@ def build_command_envelope(
 ) -> dict[str, Any]:
     """Wrap a JSON-RPC request for a registered device.
 
-    A method in ``MUST_ENCRYPT_METHODS`` is encrypted to the device's public
-    key, its JSON padded first (``_pad_to_block``), and anything else goes in
-    clear, as an object. A ``sealed`` object already in the request's params
-    goes as it is. ``one_off_key`` and ``nonce`` are for tests, and ``padded``
-    for the tests against the shared vectors, which hold the JSON alone: leave
-    them out.
+    A method in ``MUST_ENCRYPT_METHODS`` goes in ``build_encrypted_envelope``,
+    and anything else goes in clear, as an object. A ``sealed`` object already
+    in the request's params goes as it is. ``one_off_key`` and ``nonce`` are for
+    tests, and ``padded`` for the tests against the shared vectors, which hold
+    the JSON alone: leave them out.
     """
     rpc_id = request["id"]
-    envelope: dict[str, Any] = {
+    if request.get("method") in MUST_ENCRYPT_METHODS:
+        return build_encrypted_envelope(
+            request, rpc_id, registration, one_off_key=one_off_key, nonce=nonce, padded=padded
+        )
+    return {
         "profile_id": registration.profile_id,
         "device_id": registration.device_id,
         "id": rpc_id,
+        "encryption": SCHEME_NONE,
+        "payload": request,
     }
 
-    if request.get("method") not in MUST_ENCRYPT_METHODS:
-        envelope["encryption"] = SCHEME_NONE
-        envelope["payload"] = request
-        return envelope
 
+def build_encrypted_envelope(
+    payload: dict[str, Any],
+    rpc_id: str,
+    registration: Registration,
+    *,
+    one_off_key: ec.EllipticCurvePrivateKey | None = None,
+    nonce: bytes | None = None,
+    padded: bool = True,
+) -> dict[str, Any]:
+    """Wrap ``payload`` in an envelope addressed to a registered device.
+
+    It's encrypted to the device's public key, its JSON padded first
+    (``_pad_to_block``), with ``rpc_id`` as the envelope's id. See
+    ``build_command_envelope`` for ``one_off_key``, ``nonce`` and ``padded``.
+    """
     aad = additional_data(
         registration.profile_id,
         registration.device_id,
@@ -927,17 +962,21 @@ def build_command_envelope(
         registration.scheme,
         registration.key_id,
     )
-    envelope["encryption"] = registration.scheme
-    envelope["key_id"] = registration.key_id
-    json_bytes = _json_bytes(request)
-    envelope["payload"] = ecies_encrypt(
-        registration.encryption_public_key(),
-        aad,
-        _pad_to_block(json_bytes) if padded else json_bytes,
-        one_off_key=one_off_key,
-        nonce=nonce,
-    )
-    return envelope
+    json_bytes = _json_bytes(payload)
+    return {
+        "profile_id": registration.profile_id,
+        "device_id": registration.device_id,
+        "id": rpc_id,
+        "encryption": registration.scheme,
+        "key_id": registration.key_id,
+        "payload": ecies_encrypt(
+            registration.encryption_public_key(),
+            aad,
+            _pad_to_block(json_bytes) if padded else json_bytes,
+            one_off_key=one_off_key,
+            nonce=nonce,
+        ),
+    }
 
 
 def _pad_to_block(json_bytes: bytes) -> bytes:
@@ -1082,6 +1121,238 @@ def seal_admin_code_answer(
         nonce=nonce,
     )
     return answer
+
+
+# ---------------------------------------------------------------------------
+# Device calls
+# ---------------------------------------------------------------------------
+
+# The limits of zendo/v2/call_device and zendo/v2/device_call_update. The Homey
+# app has the same ones, so keep the two in sync.
+DEVICE_CALL_ID_MAX_LENGTH = 128
+DEVICE_CALL_NAME_MAX_LENGTH = 255
+DEVICE_CALL_TIMEOUT_MAX_SECONDS = 600
+# Of ``params``, ``data`` or ``response``, as the UTF-8 of their compact JSON.
+DEVICE_CALL_OBJECT_MAX_BYTES = 64 * 1024
+
+
+def _is_text(value: Any, max_length: int) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= max_length
+
+
+def _is_positive_number(value: Any) -> bool:
+    if not _is_number(value) or (isinstance(value, float) and not math.isfinite(value)):
+        return False
+    return value > 0
+
+
+def _is_too_large(value: dict[str, Any] | None) -> bool:
+    return value is not None and len(_json_bytes(value)) > DEVICE_CALL_OBJECT_MAX_BYTES
+
+
+def lost_contact(*, online: bool, offline_reason: str | None) -> bool:
+    """Return whether a managed device record says its device lost contact.
+
+    A device that unregistered stops its heartbeats and its record goes offline,
+    but it can still be connected. Any other offline record counts, including
+    one with no reason.
+    """
+    return not online and offline_reason != OFFLINE_REASON_UNREGISTERED
+
+
+def invalid_device_call_field(
+    call_id: Any,
+    profile_id: Any,
+    device_id: Any,
+    method: Any,
+    params: Any,
+    timeout_seconds: Any,
+) -> str | None:
+    """Return the first field of a ``zendo/v2/call_device`` that isn't valid, or None.
+
+    ``params`` is optional: None counts as not given.
+    """
+    if not _is_text(call_id, DEVICE_CALL_ID_MAX_LENGTH):
+        return "call_id"
+    if not isinstance(profile_id, str) or not profile_id:
+        return "profile_id"
+    if not isinstance(device_id, str) or not device_id:
+        return "device_id"
+    if not _is_text(method, DEVICE_CALL_NAME_MAX_LENGTH):
+        return "method"
+    if params is not None and not isinstance(params, dict):
+        return "params"
+    if not _is_positive_number(timeout_seconds):
+        return "timeout_seconds"
+    return None
+
+
+def invalid_device_call_update_field(
+    call_id: Any, event: Any, data: Any, response: Any
+) -> str | None:
+    """Return the first field of a ``zendo/v2/device_call_update`` that isn't valid, or None.
+
+    An update has ``response`` alone, or ``event`` with optional ``data``. None
+    counts as not given.
+    """
+    if not _is_text(call_id, DEVICE_CALL_ID_MAX_LENGTH):
+        return "call_id"
+    if response is not None:
+        if not isinstance(response, dict):
+            return "response"
+        if event is not None:
+            return "event"
+        if data is not None:
+            return "data"
+        return None
+    if not _is_text(event, DEVICE_CALL_NAME_MAX_LENGTH):
+        return "event"
+    if data is not None and not isinstance(data, dict):
+        return "data"
+    return None
+
+
+@dataclass(frozen=True)
+class DeviceCall:
+    """A call in progress."""
+
+    call_id: str
+    # The (profile_id, device_id) of the device that started it, from its token.
+    caller: tuple[str, str]
+    # The (profile_id, device_id) of the device it went to.
+    target: tuple[str, str]
+    # Cancels the timer that ends the call at its deadline.
+    cancel_deadline: Callable[[], None]
+
+
+class DeviceCallError(Exception):
+    """A device call or update that's refused, with the error code to answer."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class DeviceCallTable:
+    """The calls in progress, in memory only, by call id.
+
+    A call ends on its target's ``response`` or at its deadline. ``call_later``
+    runs an action after a delay in seconds, and returns what cancels it.
+    """
+
+    def __init__(
+        self, call_later: Callable[[float, Callable[[], None]], Callable[[], None]]
+    ) -> None:
+        self._call_later = call_later
+        self._calls: dict[str, DeviceCall] = {}
+
+    def is_in_progress(self, call_id: str) -> bool:
+        return call_id in self._calls
+
+    def start(
+        self,
+        book: RegistrationBook,
+        caller: tuple[str, str],
+        target: tuple[str, str],
+        call_id: str,
+        method: str,
+        params: dict[str, Any] | None,
+        timeout_seconds: float,
+        *,
+        target_offline: bool,
+    ) -> dict[str, Any]:
+        """Keep a new call, and return the envelope that carries it to its target.
+
+        For fields ``invalid_device_call_field`` accepts. ``target_offline`` is
+        whether the target has a managed device record that lost contact with it
+        (``lost_contact``). Raises ``DeviceCallError``, keeping nothing.
+        """
+        if book.is_tombstoned(*target):
+            raise DeviceCallError(ERROR_TARGET_REVOKED)
+        registration = book.find_by_device(*target)
+        if registration is None:
+            raise DeviceCallError(ERROR_TARGET_NOT_REGISTERED)
+        if target_offline:
+            raise DeviceCallError(ERROR_TARGET_OFFLINE)
+        if self.is_in_progress(call_id):
+            raise DeviceCallError(ERROR_CALL_ID_IN_USE)
+        if timeout_seconds > DEVICE_CALL_TIMEOUT_MAX_SECONDS:
+            raise DeviceCallError(ERROR_TIMEOUT_TOO_LONG)
+        if _is_too_large(params):
+            raise DeviceCallError(ERROR_TOO_LARGE)
+
+        envelope = build_encrypted_envelope(
+            {
+                "jsonrpc": "2.0",
+                "id": call_id,
+                "method": method,
+                "params": {} if params is None else params,
+                "timeoutSeconds": timeout_seconds,
+            },
+            call_id,
+            registration,
+        )
+        self._calls[call_id] = DeviceCall(
+            call_id,
+            caller,
+            target,
+            self._call_later(timeout_seconds, lambda: self.end(call_id)),
+        )
+        return envelope
+
+    def update(
+        self,
+        book: RegistrationBook,
+        sender: tuple[str, str],
+        call_id: str,
+        event: str | None,
+        data: dict[str, Any] | None,
+        response: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return the envelope that carries an update to the call's caller.
+
+        For fields ``invalid_device_call_update_field`` accepts. It's encrypted
+        to the caller's registration as it is now. A ``response`` ends the call.
+        Raises ``DeviceCallError``: ``call_not_found`` when ``sender`` isn't the
+        target of a call in progress with this id, or the caller's registration
+        has gone, which ends the call, and ``too_large``, which leaves it open.
+        """
+        call = self._calls.get(call_id)
+        if call is None or call.target != sender:
+            raise DeviceCallError(ERROR_CALL_NOT_FOUND)
+        caller = book.find_by_device(*call.caller)
+        if caller is None:
+            self.end(call_id)
+            raise DeviceCallError(ERROR_CALL_NOT_FOUND)
+        if _is_too_large(data) or _is_too_large(response):
+            raise DeviceCallError(ERROR_TOO_LARGE)
+
+        payload: dict[str, Any] = {
+            "callId": call_id,
+            "profileId": call.target[0],
+            "deviceId": call.target[1],
+        }
+        if response is not None:
+            payload["response"] = response
+        else:
+            payload["event"] = event
+            payload["data"] = {} if data is None else data
+        envelope = build_encrypted_envelope(payload, call_id, caller)
+        if response is not None:
+            self.end(call_id)
+        return envelope
+
+    def end(self, call_id: str) -> None:
+        """Forget a call, if it's in progress, and cancel its deadline."""
+        call = self._calls.pop(call_id, None)
+        if call is not None:
+            call.cancel_deadline()
+
+    def clear(self) -> None:
+        """Forget every call, and cancel their deadlines."""
+        for call in self._calls.values():
+            call.cancel_deadline()
+        self._calls.clear()
 
 
 # ---------------------------------------------------------------------------

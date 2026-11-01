@@ -20,6 +20,12 @@
   same way: to the registration's public key when a device reads it, and to
   the public key in the admin's token when an admin claims it. A ``sealed``
   object in a command's params is sent to the device as it is.
+- **Device calls.** An admin's device starts a call to any registered device
+  with ``zendo/v2/call_device``, which answers at once. The command goes out as
+  ``bngnt_device_call``, always encrypted to the target. The target's events and
+  answer come in with ``zendo/v2/device_call_update`` and go out as
+  ``bngnt_device_call_update``, always encrypted to the caller. Both go through
+  the subscriptions, never as bus events.
 - **Revoking** removes the device's registration, keeps a tombstone so it can't
   register again, tells it with ``bngnt_device_deleted`` and then removes its
   Home Assistant tokens.
@@ -37,6 +43,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,6 +82,8 @@ from .device_auth import (
     ERROR_WRONG_SITE,
     LINK_ANOTHER_PROPERTY,
     LINK_NOT_LINKED,
+    DeviceCallError,
+    DeviceCallTable,
     Registration,
     RegistrationError,
     TokenClaims,
@@ -85,6 +94,8 @@ from .device_auth import (
     choose_scheme,
     claimed_encryption_key_answer,
     encryption_key_answer,
+    invalid_device_call_field,
+    invalid_device_call_update_field,
     is_device_token_label,
     link_retry_interval,
     push_token_serial,
@@ -129,6 +140,8 @@ _LOGGER = logging.getLogger(__name__)
 WS_PREFIX = f"{DOMAIN}/v2/"
 
 EVENT_DEVICE_DELETED = "bngnt_device_deleted"
+EVENT_DEVICE_CALL = "bngnt_device_call"
+EVENT_DEVICE_CALL_UPDATE = "bngnt_device_call_update"
 EVENT_SUBSCRIPTIONS_ENDED = "bngnt_subscriptions_ended"
 EVENT_SITE_CONFIG_MANIFEST_UPDATED = "bngnt_site_config_manifest_updated"
 EVENT_DOORBELL_RING = "bngnt_doorbell_ring"
@@ -303,7 +316,7 @@ class BNGntSubscriptions:
 
 class BNGntDeviceAuth:
     """The site link, the registrations, the signing keys, the site config
-    encryption key and the subscriptions."""
+    encryption key, the subscriptions and the device calls in progress."""
 
     def __init__(
         self,
@@ -319,6 +332,8 @@ class BNGntDeviceAuth:
         self.registrations = registrations
         self.encryption_key = encryption_key
         self.subscriptions = BNGntSubscriptions(hass)
+        self.calls = DeviceCallTable(self._call_later)
+        self.stopped = False
 
     @callback
     def start(self) -> None:
@@ -326,7 +341,17 @@ class BNGntDeviceAuth:
 
     @callback
     def stop(self) -> None:
+        self.stopped = True
         self.subscriptions.stop()
+        self.calls.clear()
+
+    @callback
+    def _call_later(self, delay: float, action: Callable[[], None]) -> CALLBACK_TYPE:
+        @callback
+        def _run(_now: Any) -> None:
+            action()
+
+        return async_call_later(self._hass, delay, _run)
 
     # -- the link -------------------------------------------------------------
 
@@ -1060,6 +1085,42 @@ def ws_get_encryption_key(
 
 @websocket_api.websocket_command(
     _schema(
+        f"{WS_PREFIX}device_call_update",
+        {**_API_KEY, **_optional("call_id", "event", "data", "response")},
+    )
+)
+@callback
+def ws_device_call_update(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Pass an event or the final answer from a call's target on to its caller."""
+    found = _registration(hass, connection, msg)
+    if found is None:
+        return
+    auth, _, registration = found
+
+    call_id = msg.get("call_id")
+    event = msg.get("event")
+    data = msg.get("data")
+    response = msg.get("response")
+    field = invalid_device_call_update_field(call_id, event, data, response)
+    if field is not None:
+        _invalid(connection, msg["id"], _InvalidField(field))
+        return
+
+    try:
+        envelope = auth.calls.update(
+            auth.registrations.book, _ids(registration), call_id, event, data, response
+        )
+    except DeviceCallError as err:
+        _refuse(connection, msg["id"], err.code)
+        return
+    auth.subscriptions.send_to_events(EVENT_DEVICE_CALL_UPDATE, envelope)
+    connection.send_result(msg["id"], {"success": True})
+
+
+@websocket_api.websocket_command(
+    _schema(
         f"{WS_PREFIX}revoke_device",
         _optional("api_key", _TOKEN_FIELD, "profile_id", "device_id"),
     )
@@ -1446,6 +1507,65 @@ async def ws_claim_encryption_key(
     )
 
 
+@websocket_api.websocket_command(
+    _schema(
+        f"{WS_PREFIX}call_device",
+        {
+            **_TOKEN,
+            **_optional(
+                "call_id", "profile_id", "device_id", "method", "params", "timeout_seconds"
+            ),
+        },
+    )
+)
+@websocket_api.async_response
+async def ws_call_device(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Send a command to a registered device, and answer once it has gone out.
+
+    What comes back reaches the caller as ``bngnt_device_call_update``.
+    """
+    checked = await _admin_registry(hass, connection, msg)
+    if checked is None:
+        return
+    auth, registry, claims = checked
+    # The token check can span an unload, and a stopped table's timer would outlive it.
+    if auth.stopped:
+        connection.send_error(msg["id"], ERROR_NOT_SET_UP, NOT_SET_UP_MESSAGE)
+        return
+
+    call_id = msg.get("call_id")
+    profile_id = msg.get("profile_id")
+    device_id = msg.get("device_id")
+    method = msg.get("method")
+    params = msg.get("params")
+    timeout_seconds = msg.get("timeout_seconds")
+    field = invalid_device_call_field(
+        call_id, profile_id, device_id, method, params, timeout_seconds
+    )
+    if field is not None:
+        _invalid(connection, msg["id"], _InvalidField(field))
+        return
+
+    try:
+        envelope = auth.calls.start(
+            auth.registrations.book,
+            (claims.profile_id, claims.device_id),
+            (profile_id, device_id),
+            call_id,
+            method,
+            params,
+            timeout_seconds,
+            target_offline=registry.has_lost_contact(profile_id, device_id),
+        )
+    except DeviceCallError as err:
+        _refuse(connection, msg["id"], err.code)
+        return
+    auth.subscriptions.send_to_events(EVENT_DEVICE_CALL, envelope)
+    connection.send_result(msg["id"], {"success": True})
+
+
 _COMMANDS = (
     ws_info,
     ws_register_device,
@@ -1460,6 +1580,7 @@ _COMMANDS = (
     ws_complete_managed_device_settings_restore,
     ws_doorbell_action,
     ws_get_encryption_key,
+    ws_device_call_update,
     ws_revoke_device,
     ws_subscribe_managed_device_changes,
     ws_setup_status,
@@ -1472,6 +1593,7 @@ _COMMANDS = (
     ws_set_deep_link_destinations,
     ws_notify_site_config_manifest_update,
     ws_claim_encryption_key,
+    ws_call_device,
 )
 
 

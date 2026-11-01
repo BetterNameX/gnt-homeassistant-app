@@ -474,6 +474,23 @@ class MaySendCommandTest(unittest.TestCase):
                     )
 
 
+class LostContactTest(unittest.TestCase):
+    """Which managed device records answer ``target_offline`` to a device call."""
+
+    def test_an_online_record_has_not_lost_contact(self):
+        for reason in (None, "timeout", "unregistered"):
+            with self.subTest(reason=reason):
+                self.assertFalse(device_auth.lost_contact(online=True, offline_reason=reason))
+
+    def test_a_device_that_unregistered_has_not_lost_contact(self):
+        self.assertFalse(device_auth.lost_contact(online=False, offline_reason="unregistered"))
+
+    def test_any_other_offline_record_has_lost_contact(self):
+        for reason in (None, "timeout", "a_reason_from_a_later_version"):
+            with self.subTest(reason=reason):
+                self.assertTrue(device_auth.lost_contact(online=False, offline_reason=reason))
+
+
 class CommandRefusalTest(unittest.TestCase):
     """Why a command isn't sent, in the order ``send_command`` raises it."""
 
@@ -1374,6 +1391,526 @@ class EnvelopePaddingTest(unittest.TestCase):
         }
         self.assertEqual(self._envelope(request), expected)
         self.assertEqual(self._envelope(request, padded=False), expected)
+
+    def test_an_encrypted_command_is_the_always_encrypted_envelope(self):
+        vector = _envelope_vector("ecies-p256")
+        inputs = vector["inputs"]
+        request = json.loads(inputs["plaintext"])
+        for padded in (True, False):
+            with self.subTest(padded=padded):
+                options = {
+                    "one_off_key": _one_off_key(inputs["oneOffPrivateScalarHex"]),
+                    "nonce": bytes.fromhex(inputs["nonceHex"]),
+                    "padded": padded,
+                }
+                envelope = self._envelope(request, **options)
+                self.assertEqual(
+                    envelope,
+                    device_auth.build_encrypted_envelope(
+                        request, request["id"], _vector_registration(), **options
+                    ),
+                )
+                self.assertEqual(
+                    list(envelope),
+                    ["profile_id", "device_id", "id", "encryption", "key_id", "payload"],
+                )
+
+
+_CALL_ID = "9d2f6c1a-4b7e-4f10-8a3d-5e6f7a8b9c0d"
+_CALLER = ("profile_caller", "device_caller")
+_TARGET = ("profile_target", "device_target")
+_OTHER_DEVICE = ("profile_other", "device_other")
+_METHOD = "v1.test.run"
+_EVENT = "v1.test.progress"
+_OBJECT_MAX_BYTES = 65536
+
+
+def _object_of_bytes(json_bytes):
+    return {"a": "x" * (json_bytes - len('{"a":""}'))}
+
+
+def _new_device_key():
+    """Return a device's private key, and its public key as a token gives it."""
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    der = private_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return private_key, base64.b64encode(der).decode()
+
+
+def _open_envelope(envelope, private_key):
+    """Return the bytes an envelope opens to with ``private_key``, under its clear fields."""
+    aad = device_auth.additional_data(
+        envelope["profile_id"],
+        envelope["device_id"],
+        envelope["id"],
+        envelope["encryption"],
+        envelope["key_id"],
+    )
+    return device_auth.ecies_decrypt(private_key, aad, envelope["payload"])
+
+
+class _Timers:
+    """Stands in for Home Assistant's loop timer."""
+
+    def __init__(self):
+        self.started = []
+
+    def call_later(self, delay, action):
+        timer = {"delay": delay, "action": action, "cancelled": False}
+        self.started.append(timer)
+
+        def _cancel():
+            timer["cancelled"] = True
+
+        return _cancel
+
+
+class _DeviceCallTestCase(unittest.TestCase):
+    """A registered caller and target, and an empty call table."""
+
+    def setUp(self):
+        self.book = device_auth.RegistrationBook()
+        self.caller_key, caller_public_key = _new_device_key()
+        self.target_key, target_public_key = _new_device_key()
+        self.book.register(*_CALLER, admin=True, public_key=caller_public_key, now=NOW)
+        self.book.register(*_TARGET, admin=False, public_key=target_public_key, now=NOW)
+        self.timers = _Timers()
+        self.table = device_auth.DeviceCallTable(self.timers.call_later)
+
+    def _start(
+        self,
+        call_id=_CALL_ID,
+        caller=_CALLER,
+        target=_TARGET,
+        method=_METHOD,
+        params=None,
+        timeout_seconds=130,
+        target_offline=False,
+    ):
+        return self.table.start(
+            self.book,
+            caller,
+            target,
+            call_id,
+            method,
+            params,
+            timeout_seconds,
+            target_offline=target_offline,
+        )
+
+    def _update(self, sender=_TARGET, call_id=_CALL_ID, event=None, data=None, response=None):
+        return self.table.update(self.book, sender, call_id, event, data, response)
+
+    def _assert_refused(self, code, send, *args, **kwargs):
+        with self.assertRaises(device_auth.DeviceCallError) as caught:
+            send(*args, **kwargs)
+        self.assertEqual(caught.exception.code, code)
+
+
+class DeviceCallEnvelopeTest(_DeviceCallTestCase):
+    """What goes out, always encrypted and padded, addressed to the device that opens it."""
+
+    def test_the_request_opens_to_exactly_the_json_rpc_request(self):
+        params = {"label": "Front desk", "sealed": {"scheme": "ecies-p256", "data": "abc"}}
+        envelope = self._start(params=params)
+        registration = self.book.find_by_device(*_TARGET)
+        self.assertEqual(
+            {name: value for name, value in envelope.items() if name != "payload"},
+            {
+                "profile_id": _TARGET[0],
+                "device_id": _TARGET[1],
+                "id": _CALL_ID,
+                "encryption": "ecies-p256",
+                "key_id": registration.key_id,
+            },
+        )
+        opened = _open_envelope(envelope, self.target_key)
+        expected = (
+            f'{{"jsonrpc":"2.0","id":"{_CALL_ID}","method":"{_METHOD}",'
+            '"params":{"label":"Front desk","sealed":{"scheme":"ecies-p256","data":"abc"}},'
+            '"timeoutSeconds":130}'
+        ).encode()
+        self.assertEqual(opened, expected.ljust(512, b" "))
+
+    def test_no_params_opens_to_an_empty_object(self):
+        request = json.loads(_open_envelope(self._start(), self.target_key).decode())
+        self.assertEqual(request["params"], {})
+
+    def test_the_timeout_goes_as_it_came(self):
+        request = json.loads(
+            _open_envelope(self._start(timeout_seconds=12.5), self.target_key).decode()
+        )
+        self.assertEqual(request["timeoutSeconds"], 12.5)
+
+    def test_every_method_is_encrypted(self):
+        for index, method in enumerate(("screen.wakeUp", "app.lock", "v1.anything.new")):
+            with self.subTest(method):
+                envelope = self._start(call_id=f"call-{index}", method=method)
+                self.assertEqual(envelope["encryption"], "ecies-p256")
+                self.assertIsInstance(envelope["payload"], str)
+
+    def test_a_short_command_fills_one_block(self):
+        self.assertEqual(len(self._start()["payload"]), 808)
+
+    def test_a_command_over_one_block_takes_another(self):
+        envelope = self._start(params=_object_of_bytes(600))
+        self.assertEqual(len(_open_envelope(envelope, self.target_key)), 1024)
+
+    def test_the_request_opens_only_for_the_target(self):
+        envelope = self._start()
+        with self.assertRaises(InvalidTag):
+            _open_envelope(envelope, self.caller_key)
+
+    def test_a_changed_id_fails_to_open(self):
+        envelope = self._start()
+        with self.assertRaises(InvalidTag):
+            _open_envelope({**envelope, "id": "another"}, self.target_key)
+
+    def test_an_event_opens_to_exactly_the_update(self):
+        self._start()
+        envelope = self._update(event=_EVENT, data={"step": 1})
+        registration = self.book.find_by_device(*_CALLER)
+        self.assertEqual(
+            {name: value for name, value in envelope.items() if name != "payload"},
+            {
+                "profile_id": _CALLER[0],
+                "device_id": _CALLER[1],
+                "id": _CALL_ID,
+                "encryption": "ecies-p256",
+                "key_id": registration.key_id,
+            },
+        )
+        expected = (
+            f'{{"callId":"{_CALL_ID}","profileId":"{_TARGET[0]}","deviceId":"{_TARGET[1]}",'
+            f'"event":"{_EVENT}","data":{{"step":1}}}}'
+        ).encode()
+        self.assertEqual(
+            _open_envelope(envelope, self.caller_key), expected.ljust(512, b" ")
+        )
+
+    def test_an_event_with_no_data_opens_to_an_empty_object(self):
+        self._start()
+        update = json.loads(_open_envelope(self._update(event=_EVENT), self.caller_key).decode())
+        self.assertEqual(update["data"], {})
+
+    def test_a_response_opens_to_exactly_the_update(self):
+        self._start()
+        response = {"jsonrpc": "2.0", "id": _CALL_ID, "result": {"done": True}}
+        envelope = self._update(response=response)
+        self.assertEqual(envelope["profile_id"], _CALLER[0])
+        self.assertEqual(envelope["device_id"], _CALLER[1])
+        self.assertEqual(envelope["id"], _CALL_ID)
+        expected = (
+            f'{{"callId":"{_CALL_ID}","profileId":"{_TARGET[0]}","deviceId":"{_TARGET[1]}",'
+            f'"response":{{"jsonrpc":"2.0","id":"{_CALL_ID}","result":{{"done":true}}}}}}'
+        ).encode()
+        self.assertEqual(
+            _open_envelope(envelope, self.caller_key), expected.ljust(512, b" ")
+        )
+
+    def test_a_response_goes_as_it_came_with_its_error_data(self):
+        self._start()
+        response = {
+            "jsonrpc": "2.0",
+            "id": "not even this call's id",
+            "error": {"code": -32002, "message": "No", "data": {"keep": ["all", {"of": "it"}]}},
+            "extra": 1,
+        }
+        update = json.loads(
+            _open_envelope(self._update(response=response), self.caller_key).decode()
+        )
+        self.assertEqual(update["response"], response)
+
+    def test_an_update_fills_one_block(self):
+        self._start()
+        self.assertEqual(len(self._update(event=_EVENT)["payload"]), 808)
+        self.assertEqual(len(self._update(response={"id": _CALL_ID})["payload"]), 808)
+
+    def test_an_update_opens_only_for_the_caller(self):
+        self._start()
+        envelope = self._update(event=_EVENT)
+        with self.assertRaises(InvalidTag):
+            _open_envelope(envelope, self.target_key)
+
+    def test_a_caller_calling_itself_opens_both(self):
+        request = _open_envelope(self._start(target=_CALLER), self.caller_key)
+        self.assertEqual(json.loads(request.decode())["id"], _CALL_ID)
+        update = self._update(sender=_CALLER, event=_EVENT)
+        self.assertEqual(
+            json.loads(_open_envelope(update, self.caller_key).decode())["profileId"], _CALLER[0]
+        )
+
+
+class DeviceCallTableTest(_DeviceCallTestCase):
+    """The rules of the calls in progress."""
+
+    def test_a_call_is_kept_with_its_deadline(self):
+        self._start(timeout_seconds=42)
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+        self.assertEqual([timer["delay"] for timer in self.timers.started], [42])
+        self.assertFalse(self.timers.started[0]["cancelled"])
+
+    def test_an_event_leaves_the_call_open(self):
+        self._start()
+        self._update(event=_EVENT)
+        self._update(event=_EVENT, data={"step": 2})
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+        self.assertFalse(self.timers.started[0]["cancelled"])
+
+    def test_a_response_ends_the_call_and_its_deadline(self):
+        self._start()
+        self._update(response={"id": _CALL_ID, "result": {}})
+        self.assertFalse(self.table.is_in_progress(_CALL_ID))
+        self.assertTrue(self.timers.started[0]["cancelled"])
+        self._assert_refused("call_not_found", self._update, event=_EVENT)
+        self._assert_refused("call_not_found", self._update, response={})
+
+    def test_an_empty_response_still_ends_the_call(self):
+        self._start()
+        self._update(response={})
+        self.assertFalse(self.table.is_in_progress(_CALL_ID))
+
+    def test_the_deadline_ends_the_call(self):
+        self._start()
+        self.timers.started[0]["action"]()
+        self.assertFalse(self.table.is_in_progress(_CALL_ID))
+        self._assert_refused("call_not_found", self._update, response={})
+
+    def test_only_the_target_can_send_an_update(self):
+        self.book.register(*_OTHER_DEVICE, admin=False, public_key=_new_device_key()[1], now=NOW)
+        self._start()
+        for sender in (_OTHER_DEVICE, _CALLER):
+            with self.subTest(sender):
+                self._assert_refused("call_not_found", self._update, sender=sender, event=_EVENT)
+                self._assert_refused("call_not_found", self._update, sender=sender, response={})
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+        self.assertFalse(self.timers.started[0]["cancelled"])
+
+    def test_an_unknown_call_id_is_not_found(self):
+        self._start()
+        self._assert_refused("call_not_found", self._update, call_id="another", event=_EVENT)
+
+    def test_a_target_that_registers_again_carries_on_with_the_call(self):
+        self._start()
+        self.book.register(*_TARGET, admin=False, public_key=_new_device_key()[1], now=NOW)
+        self._update(event=_EVENT)
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+
+    def test_a_call_id_in_progress_is_refused_from_any_caller_to_any_target(self):
+        self.book.register(*_OTHER_DEVICE, admin=True, public_key=_new_device_key()[1], now=NOW)
+        self._start()
+        self._assert_refused("call_id_in_use", self._start)
+        self._assert_refused("call_id_in_use", self._start, caller=_OTHER_DEVICE)
+        self._assert_refused("call_id_in_use", self._start, target=_OTHER_DEVICE)
+        self.assertEqual(len(self.timers.started), 1)
+        self.assertFalse(self.timers.started[0]["cancelled"])
+
+    def test_a_call_id_can_be_used_again_once_its_call_ended(self):
+        self._start()
+        self._update(response={})
+        self._start()
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+        self.assertFalse(self.timers.started[1]["cancelled"])
+
+    def test_an_unknown_target_is_target_not_registered(self):
+        self._assert_refused("target_not_registered", self._start, target=_OTHER_DEVICE)
+
+    def test_a_revoked_target_is_target_revoked(self):
+        self.book.revoke(*_TARGET, NOW)
+        self._assert_refused("target_revoked", self._start)
+
+    def test_a_target_revoked_with_no_registration_is_target_revoked(self):
+        self.book.revoke(*_OTHER_DEVICE, NOW)
+        self._assert_refused("target_revoked", self._start, target=_OTHER_DEVICE)
+
+    def test_a_target_with_an_offline_record_is_target_offline(self):
+        self._assert_refused("target_offline", self._start, target_offline=True)
+
+    def test_a_target_without_an_offline_record_goes_ahead(self):
+        self._start(target_offline=False)
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+
+    def test_nothing_about_a_target_reads_as_being_about_the_caller(self):
+        self.book.revoke(*_TARGET, NOW)
+        for target in (_TARGET, _OTHER_DEVICE):
+            with self.subTest(target):
+                with self.assertRaises(device_auth.DeviceCallError) as caught:
+                    self._start(target=target)
+                self.assertNotIn(caught.exception.code, ("device_revoked", "unknown_api_key"))
+
+    def test_the_longest_timeout_is_ten_minutes(self):
+        self._start(timeout_seconds=600)
+        self.assertEqual(self.timers.started[0]["delay"], 600)
+        for timeout_seconds in (600.5, 601, 10**400):
+            with self.subTest(timeout_seconds):
+                self._assert_refused(
+                    "timeout_too_long",
+                    self._start,
+                    call_id="another",
+                    timeout_seconds=timeout_seconds,
+                )
+
+    def test_params_up_to_the_limit_go_and_over_it_are_too_large(self):
+        self._start(params=_object_of_bytes(_OBJECT_MAX_BYTES))
+        self._assert_refused(
+            "too_large",
+            self._start,
+            call_id="another",
+            params=_object_of_bytes(_OBJECT_MAX_BYTES + 1),
+        )
+
+    def test_the_limit_counts_bytes_not_characters(self):
+        params = {"a": "é" * 40000}
+        self.assertLess(len(device_auth._json_bytes(params).decode()), _OBJECT_MAX_BYTES)
+        self._assert_refused("too_large", self._start, params=params)
+
+    def test_a_refused_call_keeps_nothing(self):
+        self.book.revoke(*_OTHER_DEVICE, NOW)
+        refused = (
+            ("target_revoked", {"target": _OTHER_DEVICE}),
+            ("target_not_registered", {"target": ("profile_none", "device_none")}),
+            ("target_offline", {"target_offline": True}),
+            ("timeout_too_long", {"timeout_seconds": 601}),
+            ("too_large", {"params": _object_of_bytes(_OBJECT_MAX_BYTES + 1)}),
+        )
+        for code, kwargs in refused:
+            with self.subTest(code):
+                self._assert_refused(code, self._start, **kwargs)
+                self.assertFalse(self.table.is_in_progress(_CALL_ID))
+                self.assertEqual(self.timers.started, [])
+
+    def test_data_or_a_response_over_the_limit_is_too_large_and_leaves_the_call_open(self):
+        self._start()
+        too_large = _object_of_bytes(_OBJECT_MAX_BYTES + 1)
+        self._assert_refused("too_large", self._update, event=_EVENT, data=too_large)
+        self._assert_refused("too_large", self._update, response=too_large)
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+        self.assertFalse(self.timers.started[0]["cancelled"])
+
+    def test_data_and_a_response_up_to_the_limit_go(self):
+        self._start()
+        at_the_limit = _object_of_bytes(_OBJECT_MAX_BYTES)
+        self._update(event=_EVENT, data=at_the_limit)
+        self.assertTrue(self.table.is_in_progress(_CALL_ID))
+        self._update(response=at_the_limit)
+        self.assertFalse(self.table.is_in_progress(_CALL_ID))
+
+    def test_a_caller_that_registers_again_receives_updates_with_its_new_key(self):
+        self._start()
+        new_key, new_public_key = _new_device_key()
+        self.book.register(*_CALLER, admin=True, public_key=new_public_key, now=NOW)
+        envelope = self._update(event=_EVENT)
+        self.assertEqual(json.loads(_open_envelope(envelope, new_key).decode())["event"], _EVENT)
+        with self.assertRaises(InvalidTag):
+            _open_envelope(envelope, self.caller_key)
+
+    def test_a_caller_whose_registration_has_gone_ends_the_call(self):
+        self._start()
+        self.book.revoke(*_CALLER, NOW)
+        self._assert_refused("call_not_found", self._update, event=_EVENT)
+        self.assertFalse(self.table.is_in_progress(_CALL_ID))
+        self.assertTrue(self.timers.started[0]["cancelled"])
+
+    def test_clearing_forgets_every_call_and_cancels_every_deadline(self):
+        self._start(call_id="one")
+        self._start(call_id="two")
+        self.table.clear()
+        self.assertFalse(self.table.is_in_progress("one"))
+        self.assertFalse(self.table.is_in_progress("two"))
+        self.assertEqual([timer["cancelled"] for timer in self.timers.started], [True, True])
+        self._assert_refused("call_not_found", self._update, call_id="one", event=_EVENT)
+
+
+class DeviceCallFieldsTest(unittest.TestCase):
+    """The type and length checks, the only ones on what a call carries."""
+
+    @staticmethod
+    def _call_field(**fields):
+        return device_auth.invalid_device_call_field(
+            **{
+                "call_id": _CALL_ID,
+                "profile_id": _TARGET[0],
+                "device_id": _TARGET[1],
+                "method": _METHOD,
+                "params": None,
+                "timeout_seconds": 130,
+                **fields,
+            }
+        )
+
+    @staticmethod
+    def _update_field(**fields):
+        return device_auth.invalid_device_call_update_field(
+            **{"call_id": _CALL_ID, "event": None, "data": None, "response": None, **fields}
+        )
+
+    def test_a_valid_call(self):
+        self.assertIsNone(self._call_field())
+        self.assertIsNone(self._call_field(params={}))
+        self.assertIsNone(self._call_field(params={"any": ["thing"]}))
+        self.assertIsNone(self._call_field(call_id="c" * 128, method="m" * 255))
+        self.assertIsNone(self._call_field(timeout_seconds=0.5))
+
+    def test_a_timeout_over_the_limit_isnt_an_invalid_field(self):
+        self.assertIsNone(self._call_field(timeout_seconds=601))
+        self.assertIsNone(self._call_field(timeout_seconds=10**400))
+
+    def test_an_invalid_call_names_the_field(self):
+        cases = {
+            "call_id": (None, "", 42, ["x"], "c" * 129),
+            "profile_id": (None, "", 42),
+            "device_id": (None, "", 42),
+            "method": (None, "", 42, ["x"], "m" * 256),
+            "params": ("{}", [], 42, False),
+            "timeout_seconds": (
+                None,
+                0,
+                -1,
+                "130",
+                True,
+                [130],
+                float("inf"),
+                float("-inf"),
+                float("nan"),
+            ),
+        }
+        for field, values in cases.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    self.assertEqual(self._call_field(**{field: value}), field)
+
+    def test_a_valid_update(self):
+        self.assertIsNone(self._update_field(event=_EVENT))
+        self.assertIsNone(self._update_field(event=_EVENT, data={}))
+        self.assertIsNone(self._update_field(event=_EVENT, data={"any": ["thing"]}))
+        self.assertIsNone(self._update_field(event="e" * 255))
+        self.assertIsNone(self._update_field(response={}))
+        self.assertIsNone(self._update_field(response={"id": _CALL_ID, "result": {}}))
+        self.assertIsNone(self._update_field(call_id="c" * 128, response={}))
+
+    def test_an_invalid_update_names_the_field(self):
+        cases = (
+            ("call_id", {"call_id": None, "event": _EVENT}),
+            ("call_id", {"call_id": "", "event": _EVENT}),
+            ("call_id", {"call_id": 42, "event": _EVENT}),
+            ("call_id", {"call_id": "c" * 129, "event": _EVENT}),
+            ("event", {}),
+            ("event", {"data": {}}),
+            ("event", {"event": ""}),
+            ("event", {"event": 42}),
+            ("event", {"event": "e" * 256}),
+            ("data", {"event": _EVENT, "data": "{}"}),
+            ("data", {"event": _EVENT, "data": []}),
+            ("response", {"response": "{}"}),
+            ("response", {"response": []}),
+            ("response", {"response": False}),
+            ("event", {"event": _EVENT, "response": {}}),
+            ("data", {"data": {}, "response": {}}),
+        )
+        for field, fields in cases:
+            with self.subTest(field=field, fields=fields):
+                self.assertEqual(self._update_field(**fields), field)
 
 
 if __name__ == "__main__":
