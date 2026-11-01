@@ -428,7 +428,7 @@ class EnvelopeTest(unittest.TestCase):
 
     def test_a_sealed_object_in_the_params_goes_as_it_is(self):
         params = _sealed_vector("command-with-reply-key")["params"]
-        request = {"jsonrpc": "2.0", "method": "wifi.configure", "params": params, "id": "x"}
+        request = {"jsonrpc": "2.0", "method": "v1.example.configure", "params": params, "id": "x"}
         envelope = device_auth.build_command_envelope(request, _vector_registration())
         self.assertEqual(envelope["payload"]["params"]["sealed"], params["sealed"])
 
@@ -1254,7 +1254,7 @@ class SealedPaddingTest(unittest.TestCase):
         self.assertEqual(self._encrypted_bytes(fields), 1024)
 
     def test_it_opens_to_the_fields_alone(self):
-        fields = {"ssid": "Front désk", "password": "a" * 63}
+        fields = {"label": "Front désk", "secret": "a" * 63}
         opened = self._open(self._seal(fields))
         json_bytes = device_auth._json_bytes(fields)
         self.assertEqual(opened, json_bytes + b" " * (512 - len(json_bytes)))
