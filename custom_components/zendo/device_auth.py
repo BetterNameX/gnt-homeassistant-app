@@ -22,7 +22,8 @@ docs/managed-devices.md, "Device Registration (v2)".
 - **A sealed object** (``{"scheme": "ecies-p256", "data": ...}``) carries
   some of a message's fields encrypted to the device's public key, the rest of
   the message staying in clear: a registered device's key, or the key in the
-  token of an admin's call.
+  token of an admin's call. Its JSON gets trailing spaces, which JSON parsers
+  ignore, up to a multiple of 512 bytes.
 - **The site config encryption key** held is the stored one, otherwise the one
   in the ``input_text`` helper's state, otherwise none.
 """
@@ -33,6 +34,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import re
 import secrets
 from collections.abc import Callable, Iterable
@@ -72,6 +74,10 @@ MUST_ENCRYPT_METHODS = frozenset({"adminCode.set", "app.lock"})
 SEALED_METHOD_SETTINGS_RESTORE = "settingsRestore.get"
 SEALED_METHOD_ADMIN_CODE_GET = "adminCode.get"
 SEALED_METHOD_ENCRYPTION_KEY_GET = "encryptionKey.get"
+
+# A sealed object's padded JSON is a multiple of this. The app pads to the same
+# size, so keep the two in sync.
+SEALED_PAYLOAD_BLOCK_BYTES = 512
 
 # An admin's lookup of an admin code when there's none to hand out, before it's
 # sealed.
@@ -927,6 +933,14 @@ def build_command_envelope(
     return envelope
 
 
+def _pad_to_block(json_bytes: bytes) -> bytes:
+    """Add trailing spaces, which JSON parsers ignore, up to the smallest
+    multiple of ``SEALED_PAYLOAD_BLOCK_BYTES`` that holds ``json_bytes``.
+    """
+    blocks = math.ceil(len(json_bytes) / SEALED_PAYLOAD_BLOCK_BYTES)
+    return json_bytes.ljust(blocks * SEALED_PAYLOAD_BLOCK_BYTES, b" ")
+
+
 def seal_to(
     fields: dict[str, Any],
     public_key: ec.EllipticCurvePublicKey,
@@ -936,19 +950,24 @@ def seal_to(
     *,
     one_off_key: ec.EllipticCurvePrivateKey | None = None,
     nonce: bytes | None = None,
+    padded: bool = True,
 ) -> dict[str, str]:
     """Seal ``fields`` to ``public_key``, for the device ``profile_id`` +
     ``device_id`` and for ``method``.
 
     Returns ``{"scheme": "ecies-p256", "data": ...}``, for the message's
-    ``sealed`` field. The device opens it and adds the fields back.
+    ``sealed`` field. The device opens it and adds the fields back. The JSON is
+    padded before it's encrypted (``_pad_to_block``). ``one_off_key`` and
+    ``nonce`` are for tests, and ``padded`` for the tests against the shared
+    vectors, which hold the JSON alone: leave them out.
     """
+    json_bytes = _json_bytes(fields)
     return {
         "scheme": SCHEME_ECIES_P256,
         "data": ecies_encrypt(
             public_key,
             sealed_additional_data(profile_id, device_id, method),
-            _json_bytes(fields),
+            _pad_to_block(json_bytes) if padded else json_bytes,
             one_off_key=one_off_key,
             nonce=nonce,
         ),
@@ -962,11 +981,14 @@ def seal(
     *,
     one_off_key: ec.EllipticCurvePrivateKey | None = None,
     nonce: bytes | None = None,
+    padded: bool = True,
 ) -> dict[str, str]:
     """Seal ``fields`` to a registered device, for ``method``.
 
     Returns ``{"scheme": "ecies-p256", "data": ...}``, for the message's
-    ``sealed`` field. The device opens it and adds the fields back.
+    ``sealed`` field. The device opens it and adds the fields back. See
+    ``seal_to`` for the padding, and for ``one_off_key``, ``nonce`` and
+    ``padded``.
     """
     return seal_to(
         fields,
@@ -976,6 +998,7 @@ def seal(
         method,
         one_off_key=one_off_key,
         nonce=nonce,
+        padded=padded,
     )
 
 

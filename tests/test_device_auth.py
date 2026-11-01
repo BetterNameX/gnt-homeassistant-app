@@ -553,6 +553,7 @@ class SealedTest(unittest.TestCase):
             vector["method"],
             one_off_key=_one_off_key(inputs["oneOffPrivateScalarHex"]),
             nonce=bytes.fromhex(inputs["nonceHex"]),
+            padded=False,
         )
         self.assertEqual(sealed, vector["params"]["sealed"])
 
@@ -611,6 +612,7 @@ class SealedTest(unittest.TestCase):
             vector["method"],
             one_off_key=_one_off_key(inputs["oneOffPrivateScalarHex"]),
             nonce=bytes.fromhex(inputs["nonceHex"]),
+            padded=False,
         )
         self.assertEqual(sealed, vector["answer"]["restore"]["sealed"])
         self.assertEqual(vector["method"], device_auth.SEALED_METHOD_SETTINGS_RESTORE)
@@ -1204,6 +1206,107 @@ class EncryptionKeyAnswerTest(unittest.TestCase):
                     device_auth.claimed_encryption_key_answer("the key", _token_claims(name))
                 self.assertEqual(err.exception.code, device_auth.ERROR_PUBLIC_KEY_REQUIRED)
                 self.assertNotIn("the key", str(err.exception))
+
+
+_SHORT_SECRET = {"admin_code": "482915"}
+
+
+class SealedPaddingTest(unittest.TestCase):
+    """A sealed object's JSON is padded to a multiple of 512 bytes before it's encrypted."""
+
+    METHOD = "test.method"
+    # What ``data`` holds around what's encrypted: the one-off key, the nonce and the tag.
+    AROUND_PAYLOAD_BYTES = 65 + 12 + 16
+
+    def _seal(self, fields, **kwargs):
+        return device_auth.seal(fields, _vector_registration(), self.METHOD, **kwargs)
+
+    def _open(self, sealed):
+        aad = device_auth.sealed_additional_data(
+            "profile_vectors_1", "device_vectors_1", self.METHOD
+        )
+        return device_auth.ecies_decrypt(_device_private_key(), aad, sealed["data"])
+
+    def _encrypted_bytes(self, fields):
+        raw = base64.b64decode(self._seal(fields)["data"], validate=True)
+        return len(raw) - self.AROUND_PAYLOAD_BYTES
+
+    def test_the_block_is_512_bytes(self):
+        self.assertEqual(device_auth.SEALED_PAYLOAD_BLOCK_BYTES, 512)
+
+    def test_a_short_secret_fills_one_block(self):
+        data = self._seal(_SHORT_SECRET)["data"]
+        self.assertEqual(len(base64.b64decode(data, validate=True)), 605)
+        self.assertEqual(len(data), 808)
+
+    def test_json_filling_a_block_stays_that_size_and_one_more_byte_takes_another(self):
+        for json_bytes, encrypted_bytes in ((512, 512), (513, 1024), (1024, 1024), (1025, 1536)):
+            with self.subTest(json_bytes):
+                fields = {"a": "x" * (json_bytes - len('{"a":""}'))}
+                self.assertEqual(len(device_auth._json_bytes(fields)), json_bytes)
+                self.assertEqual(self._encrypted_bytes(fields), encrypted_bytes)
+
+    def test_it_counts_bytes_not_characters(self):
+        fields = {"a": "é" * 300}
+        self.assertLess(len(device_auth._json_bytes(fields).decode()), 512)
+        self.assertGreater(len(device_auth._json_bytes(fields)), 512)
+        self.assertEqual(self._encrypted_bytes(fields), 1024)
+
+    def test_it_opens_to_the_fields_alone(self):
+        fields = {"ssid": "Front désk", "password": "a" * 63}
+        opened = self._open(self._seal(fields))
+        json_bytes = device_auth._json_bytes(fields)
+        self.assertEqual(opened, json_bytes + b" " * (512 - len(json_bytes)))
+        self.assertEqual(json.loads(opened.decode()), fields)
+
+    def test_every_sealed_answer_is_padded(self):
+        registration = _vector_registration()
+        claims = _token_claims("valid-admin")
+        sealed_objects = {
+            "seal_to": device_auth.seal_to(
+                _SHORT_SECRET,
+                registration.encryption_public_key(),
+                registration.profile_id,
+                registration.device_id,
+                self.METHOD,
+            ),
+            "settings restore": device_auth.seal_settings_restore(
+                {"restore": _SHORT_SECRET}, registration
+            )["restore"]["sealed"],
+            "admin code": device_auth.seal_admin_code_answer(_SHORT_SECRET, claims)["sealed"],
+            "encryption key read": device_auth.encryption_key_answer("the key", registration)[
+                "sealed"
+            ],
+            "encryption key claim": device_auth.claimed_encryption_key_answer("the key", claims)[
+                "sealed"
+            ],
+        }
+        for name, sealed in sealed_objects.items():
+            with self.subTest(name):
+                self.assertEqual(len(sealed["data"]), 808)
+
+    def test_with_padding_off_it_seals_the_json_alone(self):
+        opened = self._open(self._seal(_SHORT_SECRET, padded=False))
+        self.assertEqual(opened, device_auth._json_bytes(_SHORT_SECRET))
+
+    def test_an_envelope_holds_the_json_alone(self):
+        request = {"jsonrpc": "2.0", "method": "app.lock", "params": {"pin": "1234"}, "id": "x"}
+        envelope = device_auth.build_command_envelope(request, _vector_registration())
+        json_bytes = device_auth._json_bytes(request)
+        self.assertEqual(
+            len(base64.b64decode(envelope["payload"], validate=True)),
+            self.AROUND_PAYLOAD_BYTES + len(json_bytes),
+        )
+        aad = device_auth.additional_data(
+            envelope["profile_id"],
+            envelope["device_id"],
+            envelope["id"],
+            envelope["encryption"],
+            envelope["key_id"],
+        )
+        self.assertEqual(
+            device_auth.ecies_decrypt(_device_private_key(), aad, envelope["payload"]), json_bytes
+        )
 
 
 if __name__ == "__main__":
