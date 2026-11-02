@@ -972,6 +972,31 @@ class TokenLabelTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertFalse(device_auth.is_device_token_label(name, "site1", "p1", "d1"))
 
+    def test_label_of_an_invitation_token(self):
+        invitation = 'Zendo token - bngnt1:{"s":"site1","p":"p1","i":"inv1"}'
+        self.assertTrue(
+            device_auth.is_invitation_token_label(invitation, "site1", "p1", "inv1")
+        )
+        for site_id, profile_id, invitation_id in (
+            ("site1", "p1", "inv2"),
+            ("site1", "p2", "inv1"),
+            ("site2", "p1", "inv1"),
+        ):
+            with self.subTest((site_id, profile_id, invitation_id)):
+                self.assertFalse(
+                    device_auth.is_invitation_token_label(
+                        invitation, site_id, profile_id, invitation_id
+                    )
+                )
+
+    def test_device_and_other_tokens_are_not_invitations(self):
+        self.assertFalse(device_auth.is_invitation_token_label(self.NAME, "site1", "p1", "d1"))
+        for name in (None, "My phone", "bngnt1:not json", "bngnt1:[]"):
+            with self.subTest(name):
+                self.assertFalse(
+                    device_auth.is_invitation_token_label(name, "site1", "p1", "inv1")
+                )
+
 
 class SiteLinkTest(unittest.TestCase):
     def test_not_linked(self):

@@ -1455,3 +1455,16 @@ def is_device_token_label(
         and label.get("p") == profile_id
         and label.get("d") == device_id
     )
+
+
+def is_invitation_token_label(
+    client_name: Any, site_id: str, profile_id: str, invitation_id: str
+) -> bool:
+    """Return whether a token's label names this invitation of this site."""
+    label = token_label(client_name)
+    return (
+        label is not None
+        and label.get("s") == site_id
+        and label.get("p") == profile_id
+        and label.get("i") == invitation_id
+    )

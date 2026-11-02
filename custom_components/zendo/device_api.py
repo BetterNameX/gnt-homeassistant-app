@@ -28,7 +28,8 @@
   the subscriptions, never as bus events.
 - **Revoking** removes the device's registration, keeps a tombstone so it can't
   register again, tells it with ``bngnt_device_deleted`` and then removes its
-  Home Assistant tokens.
+  Home Assistant tokens, on any user. Revoking an invitation only removes its
+  tokens, on any user: it has no registration.
 
 Expected failures answer ``{"success": false, "error": <code>}``. Subscriptions,
 which have no answer of their own, fail with that code as the error code
@@ -97,6 +98,7 @@ from .device_auth import (
     invalid_device_call_field,
     invalid_device_call_update_field,
     is_device_token_label,
+    is_invitation_token_label,
     link_retry_interval,
     push_token_serial,
     seal_admin_code_answer,
@@ -547,6 +549,23 @@ class BNGntDeviceAuth:
                     continue
                 self.remove_token_later(refresh_token.id)
         return deferred
+
+    async def async_revoke_invitation(self, profile_id: str, invitation_id: str) -> None:
+        """Remove the invitation's long-lived tokens on any user.
+
+        An invitation has no registration, so there's no tombstone or event.
+        """
+        site_id = self.site_id
+        if site_id is None:
+            return
+        for user in await self._hass.auth.async_get_users():
+            for refresh_token in list(user.refresh_tokens.values()):
+                if refresh_token.token_type != TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN:
+                    continue
+                if is_invitation_token_label(
+                    refresh_token.client_name, site_id, profile_id, invitation_id
+                ):
+                    self.remove_token_later(refresh_token.id)
 
     @callback
     def remove_token_later(self, token_id: str) -> None:
@@ -1170,6 +1189,38 @@ _TOKEN = {vol.Optional(_TOKEN_FIELD): object}
 
 
 @websocket_api.websocket_command(
+    _schema(
+        f"{WS_PREFIX}revoke_invitation",
+        {**_TOKEN, **_optional("profile_id", "invitation_id")},
+    )
+)
+@websocket_api.async_response
+async def ws_revoke_invitation(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Remove an invitation's long-lived tokens, on any user.
+
+    ``invitation_id`` is the id in the label of the invitation's token.
+    """
+    auth = _get_auth(hass, connection, msg)
+    if auth is None:
+        return
+    try:
+        await auth.async_admin_claims(msg.get(_TOKEN_FIELD))
+        profile_id = _string(msg, "profile_id")
+        invitation_id = _string(msg, "invitation_id")
+    except _Refusal as err:
+        _refuse(connection, msg["id"], err.code)
+        return
+    except _InvalidField as err:
+        _invalid(connection, msg["id"], err)
+        return
+
+    await auth.async_revoke_invitation(profile_id, invitation_id)
+    connection.send_result(msg["id"], {"success": True})
+
+
+@websocket_api.websocket_command(
     _schema(f"{WS_PREFIX}subscribe_managed_device_changes", _TOKEN)
 )
 @websocket_api.async_response
@@ -1582,6 +1633,7 @@ _COMMANDS = (
     ws_get_encryption_key,
     ws_device_call_update,
     ws_revoke_device,
+    ws_revoke_invitation,
     ws_subscribe_managed_device_changes,
     ws_setup_status,
     ws_set_up,
