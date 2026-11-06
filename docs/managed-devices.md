@@ -900,7 +900,7 @@ Each command takes its credential as a field, `api_key` or `device_control_backe
 
 | Command | Fields | Credential | Answer |
 |---|---|---|---|
-| `zendo/v2/info` | none | none | `{version, linked}` |
+| `zendo/v2/info` | none | none | `{version, linked, time_urls}` (see [The Time View](#the-time-view)) |
 | `zendo/v2/register_device` | `device_control_backend_token`, `encryption` | Device control backend token | See [Registering](#registering) |
 | `zendo/v2/subscribe_events` | `api_key` | API key | A subscription |
 | `zendo/v2/register_managed_device` | `api_key`, the fields of `register_managed_device` without the ids, and a wall panel's optional `device_model_slug`, `device_launcher_id` and `device_serial_number` (see [A Wall Panel's Fields](#a-wall-panels-fields)) | API key | `{success: true, managed_device_id, settings_restore_pending}` |
@@ -944,6 +944,35 @@ An admin-scoped token counts only for a device that has registered, except for `
 | `invalid_push_token` | `zendo/v2/set_up` couldn't confirm the push token's site with Zendo: Zendo refused it, or couldn't be reached. |
 
 After an unload, each command answers the error `not_set_up`, since a WebSocket command can't be unregistered. That includes `zendo/v2/info`, so `linked: false` only ever means Home Assistant isn't linked, never that the integration is unloaded.
+
+### The Time View
+
+From 2.1.0. Home Assistant answers its clock over plain HTTP on the local network, with no credential, so a wall panel's launcher can set the panel's clock on a network with no internet. The Zendo app gets the URLs from `zendo/v2/info` and hands them to the launcher. The code is in `time_view.py` (the view, its registration and what's read in Home Assistant) and `time_urls.py` (the answer and the URLs, with no Home Assistant import, so the tests load it on its own). The Homey app answers the same `{now}`, and gives its URLs as `timeUrls` in its registration answer.
+
+#### `GET /api/zendo/time`
+
+```json
+{"now": 1793232000123}
+```
+
+- **`now`** is Home Assistant's clock, in milliseconds since the Unix epoch, as an integer.
+- **It takes no credential and no input.** A query string or a body is ignored. It answers `GET` only: any other method answers 405.
+- It answers `application/json`, uncompressed, with a `Content-Length` and `Cache-Control: no-store`.
+- **It's registered once per Home Assistant start,** at the integration's first setup, as `BNGntTimeView`. A view can't be unregistered, so it keeps answering after an unload, or after the integration is removed, until Home Assistant restarts. If registering it fails, that's logged as a warning, and setup goes on without it.
+
+#### `time_urls`
+
+`zendo/v2/info` answers `time_urls`, the view's URLs, at most 4:
+
+```json
+{"version": "2.1.0", "linked": true, "time_urls": ["http://192.168.1.20:8123/api/zendo/time", "http://homeassistant.local:8123/api/zendo/time"]}
+```
+
+- **Plain `http` only, on Home Assistant's HTTP port.** When Home Assistant's HTTP server uses SSL, that port serves no plain HTTP, so `time_urls` is `[]`.
+- **First, one URL for each private IPv4 address** (in 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 169.254.0.0/16) of the network adapters enabled in Home Assistant's network settings, the default adapter's first. IPv6, loopback and any other addresses aren't used.
+- **Then a `.local` host name, when one is known:** the internal URL's host, when it's a `.local` name, otherwise, on an install with the Supervisor, the Supervisor's host name plus `.local`. No other host name is used: never the external URL's, or a remote access address.
+- No duplicates, none longer than 256 characters, and at most 4 in all, so with 4 private addresses there's no `.local` URL.
+- **Built on each call, and it never fails the command.** Each value is read on its own, so one that can't be read leaves out only the URLs that need it. Any error gives `[]`, logged at debug level, and `version` and `linked` answer as before.
 
 ### Subscriptions
 
@@ -1214,7 +1243,7 @@ The automation services, `send_notification`, `ring_doorbell`, `refresh_profiles
 
 ### Tests
 
-`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device`, what an admin's lookup answers for a device that hasn't registered, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
+`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device`, what an admin's lookup answers for a device that hasn't registered, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -1326,3 +1355,9 @@ From 2.0.3 (revoking an invitation's tokens):
 - **An older app with a 2.0.3 integration.** It never calls `zendo/v2/revoke_invitation`. It removes an invitation's token itself, as before, which reaches only the Home Assistant user it's signed in as.
 - **A newer app with an older integration.** `zendo/v2/revoke_invitation` answers `unknown_command`, and the Zendo app then removes an invitation's token itself, as an older app does, which reaches only the Home Assistant user it's signed in as. The app offers a login on another Home Assistant account whatever the integration's version, so a token made that way stays on that user until it expires, or is deleted from that user's profile in Home Assistant.
 - **Downgrading below 2.0.3.** Nothing is stored for the command, so nothing is left behind. An invitation deleted meanwhile has its token removed only from the deleting admin's own Home Assistant user: a token on another user stays until it expires, or is deleted from that user's profile in Home Assistant.
+
+From 2.1.0 (the time view):
+
+- **A newer app with an older integration.** `zendo/v2/info` answers without `time_urls`, and there's no `/api/zendo/time`. The app reads a missing `time_urls` as no URLs, and gives the launcher none.
+- **An older app with a 2.1.0 integration.** It ignores `time_urls`.
+- **Downgrading below 2.1.0.** Nothing is stored for the view, so nothing is left behind. After the next restart there's no view, and `zendo/v2/info` has no `time_urls`.

@@ -101,6 +101,7 @@ from .settings_backup import (
     async_remove_store as async_remove_settings_backup_store,
     ws_report_managed_device_settings_backup,
 )
+from .time_view import async_register_time_view
 from .v1_rules import raise_if_v1_refused
 
 _LOGGER = logging.getLogger(__name__)
@@ -862,6 +863,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass, ws_report_managed_device_settings_backup
     )
     async_register_v2_commands(hass)
+
+    # Registered once per Home Assistant start. Unlike the commands, it keeps
+    # answering after an unload.
+    async_register_time_view(hass)
 
     # --- The site link, from a push token an older version stored ---
 

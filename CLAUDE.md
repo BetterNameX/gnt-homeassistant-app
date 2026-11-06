@@ -35,11 +35,15 @@ Read these files for project details:
   the store or the `input_text` helper, and `zendo/v2/get_encryption_key` and
   `zendo/v2/claim_encryption_key`), calling a device (`zendo/v2/call_device` and
   `zendo/v2/device_call_update`, the `bngnt_device_call` and `bngnt_device_call_update`
-  events, their limits and the calls in progress), revoking, the v1 calls older apps still have, those
-  2.0.0 removed and the rules for the rest, the registrations store, and the tests against
-  the shared vectors), moving to another property or starting over (removing the
-  integration: what it removes, what comes back by itself and what an admin redoes), the
-  status entity's two attributes, and the migration to config entry minor version 2.
+  events, their limits and the calls in progress), the time view (`GET /api/zendo/time`, which
+  answers `{now}` with no credential, registered once per Home Assistant start, and the
+  `time_urls` that `zendo/v2/info` gives for it: plain `http` on local addresses only, `[]`
+  when Home Assistant uses SSL, and never failing the command), revoking, the v1 calls older
+  apps still have, those 2.0.0 removed and the rules for the rest, the registrations store,
+  and the tests against the shared vectors and of the time URLs), moving to another
+  property or starting over (removing the integration: what it removes, what comes back by
+  itself and what an admin redoes), the status entity's two attributes, and the migration to
+  config entry minor version 2.
 
 ## Tests
 

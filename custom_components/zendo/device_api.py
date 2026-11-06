@@ -136,6 +136,7 @@ from .settings_backup import (
     report_settings_backup,
     settings_restore,
 )
+from .time_view import async_time_urls
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -798,12 +799,20 @@ def _deep_link_destinations(value: Any) -> list[Any]:
 def ws_info(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Answer the integration's version, and whether it's linked to a site."""
+    """Answer the version, whether it's linked to a site, and the time view's URLs.
+
+    ``async_time_urls`` never raises: on any error it gives ``[]``.
+    """
     auth = _get_auth(hass, connection, msg)
     if auth is None:
         return
     connection.send_result(
-        msg["id"], {"version": INTEGRATION_VERSION, "linked": auth.is_linked}
+        msg["id"],
+        {
+            "version": INTEGRATION_VERSION,
+            "linked": auth.is_linked,
+            "time_urls": async_time_urls(hass),
+        },
     )
 
 
