@@ -4,9 +4,9 @@
 
 A managed device is a phone, tablet or wall panel running the Zendo app with Always-On Display (Kiosk) on. It registers with Home Assistant so automations can control it: wake the screen, set the brightness or volume, lock it, and so on. Each managed device is a Home Assistant device with its own sensor entities (battery, screen, volume, locked and so on). A wall panel can also have auto-brightness, wake on approach and presence entities (see [Wall Panel Settings and Presence](#wall-panel-settings-and-presence)).
 
-The code lives in `custom_components/zendo/managed_devices.py`, the admin code in `admin_code.py` (see [Admin Code](#admin-code)) and the settings backup in `settings_backup.py` (see [Settings Backup](#settings-backup)). The services and WebSocket commands are registered in `__init__.py`.
+The code lives in `custom_components/zendo/managed_devices.py`, the admin code in `admin_code.py` (see [Admin Code](#admin-code)), the Device Lock PIN in `app_lock_pin.py` (see [Device Lock PIN](#device-lock-pin)) and the settings backup in `settings_backup.py` (see [Settings Backup](#settings-backup)). The services and WebSocket commands are registered in `__init__.py`.
 
-From 2.0.0, a Zendo device registers with Home Assistant and calls the `zendo/v2/` WebSocket commands instead, in `device_api.py`: see [Device Registration (v2)](#device-registration-v2). The v1 services and commands below stay for devices on an older app, with the rules in [Older Apps (v1)](#older-apps-v1). Listing and replacing devices, fetching and completing a settings restore, and an admin looking up a device's admin code, are `zendo/v2/` only.
+From 2.0.0, a Zendo device registers with Home Assistant and calls the `zendo/v2/` WebSocket commands instead, in `device_api.py`: see [Device Registration (v2)](#device-registration-v2). The v1 services and commands below stay for devices on an older app, with the rules in [Older Apps (v1)](#older-apps-v1). Listing and replacing devices, fetching and completing a settings restore, an admin looking up a device's admin code, and reporting and looking up a Device Lock PIN, are `zendo/v2/` only.
 
 ---
 
@@ -20,7 +20,7 @@ The integration owns each managed device. It keeps one **record** per managed de
 
 **Managed device IDs are opaque.** Never build one from a profile ID and device ID, and never parse one. Records made before 1.9.0 have the ID `<profile_id>_<device_id>`, and new ones may have that form too, but a record's ID says nothing about the device attached to it now.
 
-Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. A record's admin code and settings backup aren't: each has its own store (see [Admin Code](#admin-code) and [Settings Backup](#settings-backup)). The persisted fields are the attached ids, the device info (including `device_os_version`, from 1.9.5 `device_model_slug`, and from 1.9.6 `device_launcher_id` and `device_serial_number`), the app version, `offline_reason`, `last_seen` and, from 1.9.3, `optional_entities` (see [Created When Reported](#created-when-reported)). The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets.
+Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. A record's admin code, Device Lock PIN and settings backup aren't: each has its own store (see [Admin Code](#admin-code), [Device Lock PIN](#device-lock-pin) and [Settings Backup](#settings-backup)). The persisted fields are the attached ids, the device info (including `device_os_version`, from 1.9.5 `device_model_slug`, and from 1.9.6 `device_launcher_id` and `device_serial_number`), the app version, `offline_reason`, `last_seen` and, from 1.9.3, `optional_entities` (see [Created When Reported](#created-when-reported)). The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets.
 
 `last_seen` is a Unix timestamp in seconds: when the device was last in touch with Home Assistant.
 
@@ -89,7 +89,7 @@ From 2.0.0 there's no v1 `list_managed_devices`, `replace_managed_device` or `de
 
 `device_os_version` is the version of the device's operating system (for example `18.5`), or `null`. An app that doesn't send it leaves it `null`.
 
-The admin code and the settings backup go through WebSocket commands instead of services. See [Admin Code](#admin-code) and [Settings Backup](#settings-backup).
+The admin code, the Device Lock PIN and the settings backup go through WebSocket commands instead of services. See [Admin Code](#admin-code), [Device Lock PIN](#device-lock-pin) and [Settings Backup](#settings-backup).
 
 `unregister_managed_device` keeps the record, its Home Assistant device and its entities, and marks them unavailable with the offline reason `unregistered`. Turning off Always-On Display or signing out of the app does this.
 
@@ -149,7 +149,7 @@ The last four are a wall panel's settings and presence sensor. Their entities ar
 | Code | Returned by | Meaning |
 |---|---|---|
 | `replacement_not_registered` | `zendo/v2/replace_managed_device` | No record has the replacement attached. It hasn't finished registering. |
-| `target_not_found` | `zendo/v2/replace_managed_device`, `zendo/v2/get_managed_device_admin_code`, `zendo/v2/configure_managed_device_admin_code` | No record has that managed device ID. |
+| `target_not_found` | `zendo/v2/replace_managed_device`, `zendo/v2/get_managed_device_admin_code`, `zendo/v2/configure_managed_device_admin_code`, `zendo/v2/get_managed_device_app_lock_pin` (from UNRELEASED) | No record has that managed device ID. |
 | `target_online` | `zendo/v2/delete_managed_device` | The record's device is online, so it can't be deleted. |
 | `target_offline` (from 2.0.0) | `zendo/v2/configure_managed_device_admin_code` | The record's device is offline, so nothing was sent. |
 | `no_answer` (from 2.0.0) | `zendo/v2/configure_managed_device_admin_code` | The device didn't answer within 10 seconds, the command couldn't be sent, or the integration unloaded before the answer. It may still have made the change. |
@@ -245,6 +245,8 @@ The integration fires three events on the Home Assistant bus, so the app can sho
 - a device sends a state update and it was offline, it's the record's first state, or anything other than `wifi_signal` changed. The integration compares the new state with the old one before it replaces it;
 - a device's admin code report changes the record's `admin_code_status`, for example from `unknown` to `set`, or from `set` to `not_set`. A new code with the status still `set` fires nothing.
 
+A Device Lock PIN report never fires it: the record's state already says whether the device is locked (see [Device Lock PIN](#device-lock-pin)).
+
 `bngnt_managed_device_removed` fires when:
 
 - a replacement takes over a record with `zendo/v2/replace_managed_device`, for the record it leaves behind, just before the target's `bngnt_managed_device_updated`;
@@ -288,6 +290,7 @@ These services are for automations to control a device. Each takes `device`, one
 - The auto-brightness and wake on approach services skip the devices that don't support the setting. See [Changing the Settings](#changing-the-settings).
 - The admin-only services are registered with `async_register_admin_service`: a call from a user who isn't an administrator is refused with `Unauthorized`, and a call with no user, such as one from an automation, is allowed.
 - `managed_device_admin_code_configure` handles its errors its own way: the devices that take the change keep it, and the error names the others. See [Admin Code](#admin-code).
+- `managed_device_app_lock` and `managed_device_app_unlock` don't write the Device Lock PIN store: the device reports its PIN, or that it isn't locked, before it answers. See [Device Lock PIN](#device-lock-pin).
 - YAML reads an unquoted `on` or `off` as a boolean, so `mode` takes `true` and `false` as `on` and `off`.
 
 ### Errors
@@ -333,7 +336,7 @@ Zendo isn't set up on Home Assistant yet. An admin needs to open the Zendo app, 
 - **One rule, in `send_command`.** Before it sends anything, it asks `command_refusal` in `device_auth.py`, so every caller gets the same answer. That checks whether the method can go to the device, with `may_send_command`, and then the link and whether the device is online. The methods are `MUST_ENCRYPT_METHODS`. A refusal raises `BNGntManagedDeviceAppUpdateRequiredError`, the same error Method not found raises, or `BNGntManagedDeviceNotLinkedError` on a Home Assistant that isn't linked.
 - **An offline device fails as offline**, whichever app it's on. The exception is a method it can't get on a Home Assistant that isn't linked: that error comes first, since bringing the device online wouldn't help.
 - **Every other command is unchanged** for a device that hasn't registered: `app.unlock`, `app.reload`, the screen, audio, screensaver, wake up, auto-brightness and wake on approach commands still reach it as a `bngnt_managed_device_command` event.
-- **The device's reports still count.** A device that hasn't registered still reports its admin code with `zendo/report_managed_device_admin_code`, so the store keeps it and its `admin_code_status` in the list reads as before. `zendo/v2/get_managed_device_admin_code` answers `unknown` for it until it registers (see [`zendo/v2/get_managed_device_admin_code`](#zendov2get_managed_device_admin_code)).
+- **The device's reports still count.** A device that hasn't registered still reports its admin code with `zendo/report_managed_device_admin_code`, so the store keeps it and its `admin_code_status` in the list reads as before. `zendo/v2/get_managed_device_admin_code` answers `unknown` for it until it registers (see [`zendo/v2/get_managed_device_admin_code`](#zendov2get_managed_device_admin_code)). A Device Lock PIN report is v2 only, so such a device has none, and `zendo/v2/get_managed_device_app_lock_pin` answers `unknown` for it too (see [Device Lock PIN](#device-lock-pin)).
 
 ---
 
@@ -419,7 +422,7 @@ It is keyed by managed device ID:
 - `reported_at` is when the device last reported, ISO 8601 in UTC.
 - A record with no entry hasn't had a report: its code is unknown.
 
-`async_setup_entry` loads the store before the registry starts, and drops the entries of managed device IDs that aren't in the config entry's records. A change is written straight after, with `async_delay_save`, and a pending write is flushed when the integration unloads, so that it can't land after the file is removed. Home Assistant's final write at stop saves one too. Once unloaded, the store takes no more writes, so a call still under way then can't write the file again after it's removed, or over the one the next setup loads. The registrations', the settings backups' and the site config encryption key's stores work the same way.
+`async_setup_entry` loads the store before the registry starts, and drops the entries of managed device IDs that aren't in the config entry's records. A change is written straight after, with `async_delay_save`, and a pending write is flushed when the integration unloads, so that it can't land after the file is removed. Home Assistant's final write at stop saves one too. Once unloaded, the store takes no more writes, so a call still under way then can't write the file again after it's removed, or over the one the next setup loads. The registrations', the Device Lock PINs', the settings backups' and the site config encryption key's stores work the same way.
 
 | When | The record's entry |
 |---|---|
@@ -567,6 +570,103 @@ The schema takes any value for `code`, and the handler checks it with a fixed me
 - **A newer Zendo app with an older integration.** The command answers `unknown_command`. The app avoids it: it checks the integration's version is 1.9.3 or later before it reports, and until then it doesn't let anyone set an admin code, since Home Assistant couldn't keep a copy.
 - **Downgrading below 1.9.3.** The earlier version doesn't know the store and leaves the file alone. After upgrading again, the entries of records that still exist come back, and each device reports again when it next connects.
 - **Removing the integration** removes the file. After reinstalling, every device's code is `unknown` until it reports, which it does when it next connects.
+
+---
+
+## Device Lock PIN
+
+From UNRELEASED. A kiosk device can be locked behind a PIN of 4, 6 or 8 digits (Device Lock, `app.lock`): by `managed_device_app_lock`, or by an admin in the Zendo app. While it's locked, the device tells Home Assistant its PIN, and once it's unlocked, that it isn't locked, at every change and every time it connects. Home Assistant keeps the last report, so an admin can look the PIN up in the Zendo app even while the device is offline. The PIN is kept and looked up as the admin code is (see [Admin Code](#admin-code)), except where this section says otherwise.
+
+A PIN never goes in a record's `state`, `_serialize_managed_device` (so never in `zendo/v2/list_managed_devices` or `bngnt_managed_device_updated`), an entity, an attribute, an event the integration fires, a log line or an error message. Unlike the admin code, the list carries no status for it either: whether the device is locked is already in its state, as `locked`.
+
+Home Assistant doesn't keep the PIN that `managed_device_app_lock` sends: the device reports it before it answers `app.lock`, as it does for every other lock and unlock. No action returns the PIN: an admin looks it up in the Zendo app, which calls `zendo/v2/get_managed_device_app_lock_pin`. Both commands are `zendo/v2/` only, with no v1 form.
+
+The code is in `app_lock_pin.py`. Its store shares the admin codes' code: `BNGntReportedCodeStore` in `admin_code.py`, which keeps its entries in `ReportedCodeBook` in `reported_codes.py`, with the rule that a PIN or a code is 4, 6 or 8 ASCII digits (`is_valid_code`).
+
+### PIN Storage
+
+The PINs are in their own store, `.storage/zendo.managed_device_app_lock_pins` (`Store` version 1), written like the admin codes' (see [Storage](#storage)): `private=True`, so only its owner can read it, with atomic writes, loaded before the registry starts, saved with `async_delay_save`, flushed when the integration unloads, and taking no more writes once unloaded.
+
+It is keyed by managed device ID:
+
+```json
+{
+  "md_3f2a9c0e8b7d4c1e9a6f5b4d3c2e1f00": { "pin": "135790", "reported_at": "2026-11-10T09:30:00.123456+00:00" },
+  "profileId123_deviceId456": { "pin": null, "reported_at": "2026-11-10T09:31:12.000000+00:00" }
+}
+```
+
+- `pin` is the PIN, or `null` when the device reported that it isn't locked.
+- `reported_at` is when the device last reported, ISO 8601 in UTC.
+- A record with no entry hasn't had a report: its PIN is unknown.
+
+| When | The record's entry |
+|---|---|
+| The device reports a PIN, or none | Set, with `reported_at` now. No event fires. |
+| `unregister_managed_device`, or a revoke, which unregisters | Kept. |
+| `zendo/v2/delete_managed_device`, or the Delete button | Removed. |
+| A replace | Removed from the target, and from the replacement: the new device starts unlocked, and reports once it has taken the record over. Until then, a lookup answers `unknown`. The settings restore carries no PIN. A retry, with the replacement already attached, changes nothing. The Homey app does the same. |
+| Home Assistant starts | Dropped if the record is gone. |
+| The integration is removed | The file is removed, in `async_remove_entry`. |
+
+### Reporting: `zendo/v2/report_managed_device_app_lock_pin`
+
+```json
+{"id": 52, "type": "zendo/v2/report_managed_device_app_lock_pin", "api_key": "<API key>", "pin": "135790"}
+```
+
+The result is `{"success": true, "registered": true}`.
+
+- `pin` is the PIN, or `null` when the device isn't locked.
+- The record is the one the caller is attached to, found as for `update_managed_device_state` (see [Finding a Record](#finding-a-record)). With none, the result is `registered: false` and nothing is kept.
+- The device reports after each registration with the v2 calls, on every lock and unlock (an automation's `app.lock` and `app.unlock`, an admin's through `zendo/v2/call_device`, and the PIN typed at the device), before it answers a lock or an unlock, and with its heartbeat until a report gets through. A lookup straight after a lock or an unlock reads the new state.
+- It fires no event, and changes nothing else on the record.
+- It isn't admin-only, like the device's other v2 commands. Extra fields are dropped, so a newer app can add one.
+- A device that hasn't registered can't report: there's no v1 form. It's never sent `app.lock` either (see [A PIN or an Admin Code Needs a Current App](#a-pin-or-an-admin-code-needs-a-current-app)).
+
+**It stays a WebSocket command, never a service:** a report fires no `call_service` event.
+
+Errors:
+
+| Error code | Message | When |
+|---|---|---|
+| `invalid_format` | `pin must be exactly 4, 6 or 8 digits, or null` | `pin` is missing, or isn't 4, 6 or 8 ASCII digits or `null`. A missing `pin` never reads as not locked. |
+| `not_set_up` | `Zendo isn't set up` | The integration isn't loaded. |
+
+It answers `{"success": false, "error": "unknown_api_key"}` for an API key that isn't one (see [The v2 Commands](#the-v2-commands)). The schema takes any value for `pin`, and the handler checks it with the fixed message. It's never logged.
+
+### `zendo/v2/get_managed_device_app_lock_pin`
+
+```json
+{"id": 53, "type": "zendo/v2/get_managed_device_app_lock_pin", "device_control_backend_token": "<device control backend token>", "managed_device_id": "md_3f2a9c0e8b7d4c1e9a6f5b4d3c2e1f00"}
+```
+
+The result:
+
+```json
+{"success": true, "status": "set", "reported_at": "2026-11-10T09:30:00.123456+00:00", "sealed": {"scheme": "ecies-p256", "data": "<base64>"}}
+```
+
+| `status` | `reported_at` | `sealed` opens to | Meaning |
+|---|---|---|---|
+| `set` | When the device last reported | `{"pin": "<the PIN>"}` | The device reported that it's locked, with this PIN. |
+| `not_set` | When the device last reported | `{"pin": null}` | The device reported that it isn't locked. |
+| `unknown` | `null` | `{"pin": null}` | The device hasn't reported: its app predates the report, it hasn't connected since the integration was updated, it has just taken the record over, or the integration was reinstalled. Or the record's attached device hasn't registered, whatever it reported. |
+
+It works as `zendo/v2/get_managed_device_admin_code` does, with the same handler in `device_api.py` (see [`zendo/v2/get_managed_device_admin_code`](#zendov2get_managed_device_admin_code)):
+
+- **It reads only the store** and sends nothing to the device, so it works while the device is offline.
+- **A device that hasn't registered reads as `unknown`.** For a record whose attached device has no registration with this integration, a revoked device included, the answer has `status: "unknown"` and `reported_at: null`, and `sealed` opens to `{"pin": null}`, whatever the store holds. It's the attached device that counts, not the caller. The store doesn't change. The rule is `app_lock_pin_lookup_for_attached_device` in `device_auth.py`, the admin code's rule.
+- **The PIN is never in clear**, not even `null`: every answer has a `sealed` object instead of `pin`, for the method `appLockPin.get`. It's sealed to the encryption public key in the caller's token, and its additional data is `sealed`, the caller's `profileId`, its `deviceId` and `appLockPin.get`, joined by newlines (see [Sealed Objects](#sealed-objects)).
+- **Its errors are the admin code lookup's:** the token's (`not_linked`, `invalid_token`, `wrong_site`, `not_admin`, `device_revoked`, `unknown_api_key`), then `public_key_required`, checked after the token and before the fields, then `invalid_format` with `Invalid managed_device_id` for a `managed_device_id` that's missing, empty or not a string, then `target_not_found` for one that no record has.
+- **The status and the record's `locked` come from separate reports**, so they can disagree: for example `unknown` for a locked device whose app predates the report.
+
+### Device Lock PIN Compatibility
+
+- **An older Zendo app with this integration.** It never reports, so a lookup answers `unknown`. Locking and unlocking it work as before.
+- **A newer Zendo app with an older integration.** Both commands answer `unknown_command`. The device stops reporting until it next connects, and the Zendo app shows no PIN. It finds out from that answer, not from the integration's version. Locking and unlocking work as before: Home Assistant just keeps no copy.
+- **Downgrading below UNRELEASED.** The earlier version doesn't know the store and leaves the file alone. After upgrading again, the entries of records that still exist come back: a record replaced meanwhile may read its old device's PIN until the new device reports, which it does when it next connects.
+- **Removing the integration** removes the file. After reinstalling, every device's PIN is `unknown` until it reports, which it does when it next connects.
 
 ---
 
@@ -743,6 +843,7 @@ For example, an admin replaces the panel "Hallway" with "Hallway 2". Hallway 2 i
    - The record the replacement leaves behind is removed, and so is its Home Assistant device. Home Assistant removes the device's entities with it.
    - The target's entities take the replacement's availability and state. The target keeps its optional entities, and gets any the replacement's state has a value for (see [Created When Reported](#created-when-reported)).
    - The old device's code state wins: the target keeps its admin code entry, `set` or `not_set`, or stays `unknown` without one, and never takes the replacement's (see [Admin Code](#admin-code)).
+   - The target's Device Lock PIN entry is removed, and so is the replacement's: the new device starts unlocked, and reports once it has taken the record over (see [Device Lock PIN](#device-lock-pin)).
    - The target gets a settings restore, a snapshot of its latest backup and of its admin code status and code, for the replacement to fetch. The replacement's own backup entry is removed (see [Settings Backup](#settings-backup)).
    - `bngnt_managed_device_removed` fires for the record the replacement leaves behind, then `bngnt_managed_device_updated` for the target, with the `admin_code_status` it has after the replace, then `bngnt_managed_device_replaced`.
    - The response carries the target's managed device ID and `previous_device_name`, the target's device name from before, so the app can offer to give the replacement that name.
@@ -753,7 +854,7 @@ An online target can be taken over: the app asks for a second confirmation, and 
 
 ## Deleting a Device
 
-Only offline managed devices can be deleted. Both ways go through `BNGntManagedDeviceRegistry.delete_device`, which removes the record's admin code entry (see [Admin Code](#admin-code)) and its settings backup entry, pending restore included (see [Settings Backup](#settings-backup)), and fires `bngnt_managed_device_removed`.
+Only offline managed devices can be deleted. Both ways go through `BNGntManagedDeviceRegistry.delete_device`, which removes the record's admin code entry (see [Admin Code](#admin-code)), its Device Lock PIN entry (see [Device Lock PIN](#device-lock-pin)) and its settings backup entry, pending restore included (see [Settings Backup](#settings-backup)), and fires `bngnt_managed_device_removed`.
 
 - **`zendo/v2/delete_managed_device`** forgets the record and removes its Home Assistant device, and Home Assistant removes the device's entities with it. An unknown managed device ID returns `deleted: false`.
 - **The Delete button** on a managed device's page in Home Assistant calls `async_remove_config_entry_device` in `__init__.py`:
@@ -908,6 +1009,7 @@ Each command takes its credential as a field, `api_key` or `device_control_backe
 | `zendo/v2/update_managed_device_state` | `api_key`, `state` (an object, or a JSON-stringified one) | API key | `{success: true, registered, settings_restore_pending}` |
 | `zendo/v2/managed_device_command_response` | `api_key`, `response` (an object, or a JSON string) | API key | `{success: true}` |
 | `zendo/v2/report_managed_device_admin_code` | `api_key`, `admin_code` | API key | As `zendo/report_managed_device_admin_code` |
+| `zendo/v2/report_managed_device_app_lock_pin` (from UNRELEASED) | `api_key`, `pin` | API key | `{success: true, registered}` (see [Device Lock PIN](#device-lock-pin)) |
 | `zendo/v2/report_managed_device_settings_backup` | `api_key`, `settings_backup` | API key | As its v1 command (see [Reporting a Backup](#reporting-a-backup)) |
 | `zendo/v2/get_managed_device_settings_restore` | `api_key` | API key | The pending restore, with `admin_code` in a sealed object (see [Settings Backup](#settings-backup) and [Sealed Objects](#sealed-objects)) |
 | `zendo/v2/complete_managed_device_settings_restore` | `api_key`, `restore_id` | API key | `{success: true, registered, completed}` (see [Settings Backup](#settings-backup)) |
@@ -923,6 +1025,7 @@ Each command takes its credential as a field, `api_key` or `device_control_backe
 | `zendo/v2/replace_managed_device` | `device_control_backend_token`, `profile_id`, `device_id`, `managed_device_id` | Admin-scoped token | `{success: true, managed_device_id, previous_device_name}` or `{success: false, error}` (see [Replacing a Device](#replacing-a-device)) |
 | `zendo/v2/delete_managed_device` | `device_control_backend_token`, `managed_device_id` | Admin-scoped token | `{success: true, deleted}` or `{success: false, error: "target_online"}` (see [Deleting a Device](#deleting-a-device)) |
 | `zendo/v2/get_managed_device_admin_code` | `device_control_backend_token`, `managed_device_id` | Admin-scoped token | `{success: true, status, reported_at, sealed}`, with `admin_code` in the sealed object, or `{success: false, error}` (see [Admin Commands (v2)](#admin-commands-v2)) |
+| `zendo/v2/get_managed_device_app_lock_pin` (from UNRELEASED) | `device_control_backend_token`, `managed_device_id` | Admin-scoped token | `{success: true, status, reported_at, sealed}`, with `pin` in the sealed object, or `{success: false, error}` (see [`zendo/v2/get_managed_device_app_lock_pin`](#zendov2get_managed_device_app_lock_pin)) |
 | `zendo/v2/configure_managed_device_admin_code` | `device_control_backend_token`, `managed_device_id`, and either `code` or `remove: true` | Admin-scoped token | `{success: true}` or `{success: false, error}` (see [Admin Commands (v2)](#admin-commands-v2)) |
 | `zendo/v2/set_deep_link_destinations` | `device_control_backend_token`, `destinations` (a list, or a JSON-stringified one) | Admin-scoped token | `{success: true}` |
 | `zendo/v2/notify_site_config_manifest_update` | `device_control_backend_token`, `payload` | Admin-scoped token | `{success: true}`, and `bngnt_site_config_manifest_updated` fires |
@@ -939,7 +1042,7 @@ An admin-scoped token counts only for a device that has registered, except for `
 | `not_admin` | The call needs an admin-scoped token, or, for `zendo/v2/set_up` on a Home Assistant that isn't linked, a Home Assistant administrator. |
 | `unknown_api_key` | No registration has that API key, or the admin's device has none. The app registers, then tries again. |
 | `device_revoked` | The device was revoked. |
-| `public_key_required` | Registering, `zendo/v2/get_managed_device_admin_code` or `zendo/v2/claim_encryption_key`, with a token that carries no `encryptionPublicKey`, or one that isn't a P-256 key. |
+| `public_key_required` | Registering, `zendo/v2/get_managed_device_admin_code`, `zendo/v2/get_managed_device_app_lock_pin` or `zendo/v2/claim_encryption_key`, with a token that carries no `encryptionPublicKey`, or one that isn't a P-256 key. |
 | `unsupported_scheme` | The device and the integration have no encryption scheme in common. |
 | `invalid_push_token` | `zendo/v2/set_up` couldn't confirm the push token's site with Zendo: Zendo refused it, or couldn't be reached. |
 
@@ -1020,6 +1123,7 @@ A sealed object carries some of a message's fields encrypted to the public key o
 
 - **The settings restore answer** of `zendo/v2/get_managed_device_settings_restore` has no `admin_code`: its `restore` carries a `sealed` object instead, for the method `settingsRestore.get`, which opens to `{"admin_code": <the code, or null>}`. Every restore gets one, with a code or without. `admin_code_status` stays in clear.
 - **The admin code answer** of `zendo/v2/get_managed_device_admin_code` has no `admin_code` either: it carries a `sealed` object instead, for the method `adminCode.get`, which opens to `{"admin_code": <the code, or null>}`. It's sealed to the encryption public key in the caller's token, not a registration's, with the caller's `profileId` and `deviceId` from the token in the additional data. Every answer gets one, with a code or without. `status` and `reported_at` stay in clear.
+- **The Device Lock PIN answer** of `zendo/v2/get_managed_device_app_lock_pin`, from UNRELEASED, is sealed the same way, for the method `appLockPin.get`, and opens to `{"pin": <the PIN, or null>}`. It has no `pin` in clear, and every answer gets a `sealed` object, with a PIN or without. `status` and `reported_at` stay in clear.
 - **The site config encryption key's answers,** from `zendo/v2/get_encryption_key` and `zendo/v2/claim_encryption_key`, carry a `sealed` object for the method `encryptionKey.get`, which opens to `{"key": <the key>}`. A read is sealed to the registration's public key, and a claim to the encryption public key in the caller's token (see [The Site Config Encryption Key](#the-site-config-encryption-key)).
 - **A `sealed` object in a command's params** is sent to the device as it is.
 
@@ -1243,7 +1347,7 @@ The automation services, `send_notification`, `ring_doorbell`, `refresh_profiles
 
 ### Tests
 
-`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device`, what an admin's lookup answers for a device that hasn't registered, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
+`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device` and `app_lock_pin_lookup_for_attached_device`, what an admin's lookup of an admin code or a Device Lock PIN answers for a device that hasn't registered, and what the PIN's sealed answer opens to, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_reported_codes.py` checks `reported_codes.py`, for the admin code store's field and the Device Lock PIN store's: which values are a code or a PIN (4, 6 or 8 ASCII digits), the statuses, reporting and removing, and which entries a load keeps. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -1261,16 +1365,16 @@ Home Assistant stays linked to the property it was first linked to, and there's 
 - every device's registration, and the record of the devices that were revoked;
 - push notifications: the push token, and the people and device group entities;
 - the managed devices, with their Home Assistant devices and entities, so the automations that use them stop working;
-- every device's admin code and settings backup, and any settings restore still waiting for a replacement, which then keeps its own settings;
+- every device's admin code, Device Lock PIN and settings backup, and any settings restore still waiting for a replacement, which then keeps its own settings;
 - the integration's copy of the site config encryption key;
 - the deep link destinations.
 
-`async_remove_entry` removes the admin codes', the settings backups', the registrations', the signing keys' and the site config encryption key's stores. Home Assistant removes the config entry, which holds the link, the push token and the managed device records, and the entry's devices and entities with it. The devices stay signed in to Home Assistant: removing the integration leaves the Home Assistant tokens the Zendo app made, so each device connects again by itself. It also leaves the site config encryption key's helper, which isn't the integration's.
+`async_remove_entry` removes the admin codes', the Device Lock PINs', the settings backups', the registrations', the signing keys' and the site config encryption key's stores. Home Assistant removes the config entry, which holds the link, the push token and the managed device records, and the entry's devices and entities with it. The devices stay signed in to Home Assistant: removing the integration leaves the Home Assistant tokens the Zendo app made, so each device connects again by itself. It also leaves the site config encryption key's helper, which isn't the integration's.
 
 **Once an admin has set it up again, by itself:**
 
 - each device registers again, and reports its state again;
-- each device reports its admin code and its settings backup again. Until it does, its admin code status is `unknown`;
+- each device reports its admin code, its Device Lock PIN and its settings backup again. Until it does, its admin code status is `unknown`, and so is a lookup of its PIN;
 - setup copies the site config encryption key from the helper again, when the helper holds one, whichever key the store held before. At another property, that's the old property's key. With none there, the next admin's claim sets it (see [The Site Config Encryption Key](#the-site-config-encryption-key));
 - each device gets a managed device again. A device that had one here before asks for the managed device ID it had, and gets it back, and Home Assistant can bring its old device and entities back with it (see [Choosing a Managed Device ID](#choosing-a-managed-device-id)). Any other device gets a new managed device: at another property, that's every device.
 
@@ -1361,3 +1465,5 @@ From 2.1.0 (the time view):
 - **A newer app with an older integration.** `zendo/v2/info` answers without `time_urls`, and there's no `/api/zendo/time`. The app reads a missing `time_urls` as no URLs, and gives the launcher none.
 - **An older app with a 2.1.0 integration.** It ignores `time_urls`.
 - **Downgrading below 2.1.0.** Nothing is stored for the view, so nothing is left behind. After the next restart there's no view, and `zendo/v2/info` has no `time_urls`.
+
+For the Device Lock PIN, from UNRELEASED, see [Device Lock PIN Compatibility](#device-lock-pin-compatibility).

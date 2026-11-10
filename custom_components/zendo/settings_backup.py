@@ -29,15 +29,15 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .admin_code import (
-    ADMIN_CODE_STATUSES,
-    STATUS_SET,
-    STATUS_UNKNOWN,
-    AdminCodeStatus,
-    is_valid_admin_code,
-)
 from .const import DOMAIN
 from .managed_devices import BNGntManagedDeviceRegistry
+from .reported_codes import (
+    CODE_STATUSES,
+    STATUS_SET,
+    STATUS_UNKNOWN,
+    CodeStatus,
+    is_valid_code,
+)
 from .v1_rules import V1_REFUSED_RESULT, is_v1_refused
 
 STORAGE_VERSION = 1
@@ -89,7 +89,7 @@ class BNGntSettingsRestore(TypedDict):
     settings_backup: dict[str, Any] | None
     # The record's admin code status when it was replaced. Only set leaves the
     # new device with a code: for not_set and unknown it removes its own.
-    admin_code_status: AdminCodeStatus
+    admin_code_status: CodeStatus
     # The code when admin_code_status is set, and None otherwise.
     admin_code: str | None
     # ISO 8601, UTC: when the record was last replaced.
@@ -121,7 +121,7 @@ def _restored_restore(value: Any) -> BNGntSettingsRestore | None:
         return None
     if not (settings_backup is None or isinstance(settings_backup, dict)):
         return None
-    if not (admin_code is None or is_valid_admin_code(admin_code)):
+    if not (admin_code is None or is_valid_code(admin_code)):
         return None
     if not isinstance(created_at, str):
         return None
@@ -131,7 +131,7 @@ def _restored_restore(value: Any) -> BNGntSettingsRestore | None:
     admin_code_status = value.get("admin_code_status")
     if "admin_code_status" not in value:
         admin_code_status = STATUS_UNKNOWN if admin_code is None else STATUS_SET
-    if admin_code_status not in ADMIN_CODE_STATUSES:
+    if admin_code_status not in CODE_STATUSES:
         return None
     if (admin_code_status == STATUS_SET) != (admin_code is not None):
         return None
@@ -252,7 +252,7 @@ class BNGntSettingsBackupStore:
         replacement_key: str,
         target_key: str,
         previous_device_name: str,
-        admin_code_status: AdminCodeStatus,
+        admin_code_status: CodeStatus,
         admin_code: str | None,
     ) -> None:
         """Leave a restore on the target for the device that takes it over.

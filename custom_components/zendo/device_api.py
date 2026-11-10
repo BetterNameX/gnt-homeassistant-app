@@ -16,10 +16,11 @@
   every open subscription with ``bngnt_subscriptions_ended``.
 - **Sealed objects.** The admin code in a settings restore answer is sealed to
   the device's public key, and the one in an admin's admin code lookup to the
-  public key in the admin's token. The site config encryption key comes the
-  same way: to the registration's public key when a device reads it, and to
-  the public key in the admin's token when an admin claims it. A ``sealed``
-  object in a command's params is sent to the device as it is.
+  public key in the admin's token, as is the PIN in an admin's Device Lock PIN
+  lookup. The site config encryption key comes the same way: to the
+  registration's public key when a device reads it, and to the public key in
+  the admin's token when an admin claims it. A ``sealed`` object in a
+  command's params is sent to the device as it is.
 - **Device calls.** An admin's device starts a call to any registered device
   with ``zendo/v2/call_device``, which answers at once. The command goes out as
   ``bngnt_device_call``, always encrypted to the target. The target's events and
@@ -61,10 +62,14 @@ from .admin_code import (
     INVALID_REPORTED_ADMIN_CODE_MESSAGE,
     admin_code_lookup,
     async_send_admin_code,
-    is_valid_admin_code,
     report_admin_code,
 )
 from .api_client import BNGntControlBackendNoAnswerError, fetch_site_id
+from .app_lock_pin import (
+    INVALID_REPORTED_APP_LOCK_PIN_MESSAGE,
+    app_lock_pin_lookup,
+    report_app_lock_pin,
+)
 from .const import (
     CONF_CACHED_DEEP_LINK_DESTINATIONS,
     CONF_LINKED_SITE_ID,
@@ -86,10 +91,12 @@ from .device_auth import (
     DeviceCallError,
     DeviceCallTable,
     Registration,
+    RegistrationBook,
     RegistrationError,
     TokenClaims,
     TokenError,
     admin_code_lookup_for_attached_device,
+    app_lock_pin_lookup_for_attached_device,
     build_command_envelope,
     check_token,
     choose_scheme,
@@ -102,6 +109,7 @@ from .device_auth import (
     link_retry_interval,
     push_token_serial,
     seal_admin_code_answer,
+    seal_app_lock_pin_answer,
     seal_settings_restore,
     site_link,
     token_kid,
@@ -129,6 +137,7 @@ from .managed_devices import (
     update_managed_device_state,
 )
 from .registrations import BNGntRegistrationStore
+from .reported_codes import is_valid_code
 from .settings_backup import (
     INVALID_SETTINGS_BACKUP_MESSAGE,
     complete_settings_restore,
@@ -978,13 +987,43 @@ def ws_report_managed_device_admin_code(
         return
     _, registry, registration = found
     code = msg["admin_code"]
-    if code is not None and not is_valid_admin_code(code):
+    if code is not None and not is_valid_code(code):
         connection.send_error(
             msg["id"], websocket_api.ERR_INVALID_FORMAT, INVALID_REPORTED_ADMIN_CODE_MESSAGE
         )
         return
     connection.send_result(
         msg["id"], report_admin_code(registry, *_ids(registration), code)
+    )
+
+
+@websocket_api.websocket_command(
+    _schema(
+        f"{WS_PREFIX}report_managed_device_app_lock_pin",
+        {**_API_KEY, **_optional("pin")},
+    )
+)
+@callback
+def ws_report_managed_device_app_lock_pin(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Keep the Device Lock PIN the caller reports, or that it isn't locked.
+
+    A missing ``pin`` fails as one that isn't valid: only null reads as not
+    locked.
+    """
+    found = _registration(hass, connection, msg)
+    if found is None:
+        return
+    _, registry, registration = found
+    pin = msg.get("pin")
+    if "pin" not in msg or (pin is not None and not is_valid_code(pin)):
+        connection.send_error(
+            msg["id"], websocket_api.ERR_INVALID_FORMAT, INVALID_REPORTED_APP_LOCK_PIN_MESSAGE
+        )
+        return
+    connection.send_result(
+        msg["id"], report_app_lock_pin(registry, *_ids(registration), pin)
     )
 
 
@@ -1387,17 +1426,17 @@ async def ws_delete_managed_device(
     connection.send_result(msg["id"], delete_managed_device(registry, managed_device_id))
 
 
-@websocket_api.websocket_command(
-    _schema(
-        f"{WS_PREFIX}get_managed_device_admin_code",
-        {**_TOKEN, **_optional("managed_device_id")},
-    )
-)
-@websocket_api.async_response
-async def ws_get_managed_device_admin_code(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+async def _answer_reported_code_lookup(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+    lookup_in_store: Callable[[BNGntManagedDeviceRegistry, str], dict[str, Any] | None],
+    for_attached_device: Callable[
+        [dict[str, Any], RegistrationBook, str, str], dict[str, Any]
+    ],
+    seal_answer: Callable[[dict[str, Any], TokenClaims], dict[str, Any]],
 ) -> None:
-    """Return a managed device's admin code, as its device last reported it.
+    """Answer an admin's lookup of a code a managed device reports.
 
     Reads only the store, so it works while the device is offline. A record whose
     attached device hasn't registered reads as unknown. The code, or null, comes
@@ -1418,16 +1457,65 @@ async def ws_get_managed_device_admin_code(
         _invalid(connection, msg["id"], err)
         return
 
-    lookup = admin_code_lookup(registry, managed_device_id)
+    lookup = lookup_in_store(registry, managed_device_id)
     device = registry.get_device(managed_device_id)
     if lookup is None or device is None:
         _refuse(connection, msg["id"], ERROR_TARGET_NOT_FOUND)
         return
-    lookup = admin_code_lookup_for_attached_device(
+    lookup = for_attached_device(
         lookup, auth.registrations.book, device["profile_id"], device["device_id"]
     )
-    connection.send_result(
-        msg["id"], seal_admin_code_answer({"success": True, **lookup}, claims)
+    connection.send_result(msg["id"], seal_answer({"success": True, **lookup}, claims))
+
+
+@websocket_api.websocket_command(
+    _schema(
+        f"{WS_PREFIX}get_managed_device_admin_code",
+        {**_TOKEN, **_optional("managed_device_id")},
+    )
+)
+@websocket_api.async_response
+async def ws_get_managed_device_admin_code(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return a managed device's admin code, as its device last reported it.
+
+    Reads only the store, so it works while the device is offline. A record whose
+    attached device hasn't registered reads as unknown. The code, or null, comes
+    sealed to the encryption public key in the caller's token.
+    """
+    await _answer_reported_code_lookup(
+        hass,
+        connection,
+        msg,
+        admin_code_lookup,
+        admin_code_lookup_for_attached_device,
+        seal_admin_code_answer,
+    )
+
+
+@websocket_api.websocket_command(
+    _schema(
+        f"{WS_PREFIX}get_managed_device_app_lock_pin",
+        {**_TOKEN, **_optional("managed_device_id")},
+    )
+)
+@websocket_api.async_response
+async def ws_get_managed_device_app_lock_pin(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return a managed device's Device Lock PIN, as its device last reported it.
+
+    Answers as ``zendo/v2/get_managed_device_admin_code`` does, with the PIN, or
+    null when the device isn't locked, sealed for ``appLockPin.get``.
+    """
+    await _answer_reported_code_lookup(
+        hass,
+        connection,
+        msg,
+        app_lock_pin_lookup,
+        app_lock_pin_lookup_for_attached_device,
+        seal_app_lock_pin_answer,
     )
 
 
@@ -1449,7 +1537,7 @@ def _admin_code_to_configure(msg: dict[str, Any]) -> str | None:
         raise _InvalidRequest(CODE_OR_REMOVE_MESSAGE)
     if code is None:
         return None
-    if not is_valid_admin_code(code):
+    if not is_valid_code(code):
         raise _InvalidRequest(INVALID_CODE_MESSAGE)
     return code
 
@@ -1635,6 +1723,7 @@ _COMMANDS = (
     ws_update_managed_device_state,
     ws_managed_device_command_response,
     ws_report_managed_device_admin_code,
+    ws_report_managed_device_app_lock_pin,
     ws_report_managed_device_settings_backup,
     ws_get_managed_device_settings_restore,
     ws_complete_managed_device_settings_restore,
@@ -1650,6 +1739,7 @@ _COMMANDS = (
     ws_replace_managed_device,
     ws_delete_managed_device,
     ws_get_managed_device_admin_code,
+    ws_get_managed_device_app_lock_pin,
     ws_configure_managed_device_admin_code,
     ws_set_deep_link_destinations,
     ws_notify_site_config_manifest_update,

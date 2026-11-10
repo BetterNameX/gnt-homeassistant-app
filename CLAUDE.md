@@ -19,7 +19,11 @@ Read these files for project details:
   admin views and changes it with, the view sealed to the key in the admin's token, the
   lookup's `unknown` for a device that hasn't registered, the
   `managed_device_admin_code_get` action 2.0.0 removed, and on a replace the old record's
-  code status winning: the new device keeps a code only when it's `set`), the settings backup
+  code status winning: the new device keeps a code only when it's `set`), the Device Lock PIN
+  (its private store, shared in code with the admin code's, the `zendo/v2/` command a device
+  reports it with, the `zendo/v2/` command an admin looks it up with, sealed to the key in the
+  admin's token and `unknown` for a device that hasn't registered, no action that returns it,
+  no status in the list or events, and on a replace removed from both records), the settings backup
   (its private store, the restore every replace leaves for the replacement, passed on under
   a new id while one is still pending, the three WebSocket commands, of which fetching and
   completing the restore are `zendo/v2/` only, the 16 KiB cap shared with the Homey app and

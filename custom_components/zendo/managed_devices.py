@@ -75,6 +75,12 @@ leaves the target's entry as it is, or the target without one, and drops the
 replacement's: the old device's code state wins. A code never goes in a
 record, its serialisation or an event: only its status does.
 
+Device Lock PINs: ``app_lock_pin.py`` keeps the PIN each record's device last
+reported while it was locked, or that it wasn't, by managed device ID. Deleting
+a record removes its entry, and a replace removes the target's and the
+replacement's: the new device starts unlocked. A PIN never goes in a record,
+its serialisation or an event, and nor does its status.
+
 Settings backups: ``settings_backup.py`` keeps each record's latest settings
 backup, by managed device ID, and the restore a replace leaves on the target:
 a snapshot of the target's backup and admin code, for the replacement to
@@ -129,6 +135,7 @@ from .v1_rules import V1_REFUSED_RESULT, is_v1_refused, raise_if_v1_refused
 
 if TYPE_CHECKING:
     from .admin_code import BNGntAdminCodeStore
+    from .app_lock_pin import BNGntAppLockPinStore
     from .settings_backup import BNGntSettingsBackupStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -730,9 +737,9 @@ class BNGntManagedDeviceRegistry:
     """Tracks managed devices, the device attached to each, and online status.
 
     ``_devices`` maps each managed device ID to its record. ``admin_codes``
-    keeps the admin code each record's device last reported, and
-    ``settings_backups`` each record's settings backup and restore, by the
-    same ID.
+    keeps the admin code each record's device last reported,
+    ``app_lock_pins`` its Device Lock PIN, and ``settings_backups`` each
+    record's settings backup and restore, by the same ID.
     """
 
     def __init__(
@@ -740,11 +747,13 @@ class BNGntManagedDeviceRegistry:
         hass: HomeAssistant,
         entry: ConfigEntry,
         admin_codes: BNGntAdminCodeStore,
+        app_lock_pins: BNGntAppLockPinStore,
         settings_backups: BNGntSettingsBackupStore,
     ) -> None:
         self._hass = hass
         self._entry = entry
         self._admin_codes = admin_codes
+        self._app_lock_pins = app_lock_pins
         self._settings_backups = settings_backups
         self._devices: dict[str, BNGntManagedDeviceRecord] = {}
         self._pending_commands: dict[str, asyncio.Future] = {}
@@ -808,6 +817,10 @@ class BNGntManagedDeviceRegistry:
     @property
     def admin_codes(self) -> BNGntAdminCodeStore:
         return self._admin_codes
+
+    @property
+    def app_lock_pins(self) -> BNGntAppLockPinStore:
+        return self._app_lock_pins
 
     @property
     def settings_backups(self) -> BNGntSettingsBackupStore:
@@ -936,8 +949,8 @@ class BNGntManagedDeviceRegistry:
 
         Called when kiosk mode is disabled. The record, its HA device and its
         entities stay (not deleted) so automations referencing them don't
-        break -- they just show as unavailable. So do its admin code and
-        settings backup entries.
+        break -- they just show as unavailable. So do its admin code, Device
+        Lock PIN and settings backup entries.
         Returns False when no managed device is attached to the device.
         """
         key = self._find_key(profile_id, device_id)
@@ -1026,10 +1039,11 @@ class BNGntManagedDeviceRegistry:
         ids, device info, state and online status.
 
         The target keeps its own admin code entry, or stays without one, and
-        never takes the replacement's. It gets a settings restore for the
-        replacement to fetch: a snapshot of its latest backup and of its admin
-        code status and code, or the data of a restore still pending on it,
-        under a new ID. The record the replacement
+        never takes the replacement's. Its Device Lock PIN entry is removed, as
+        is the replacement's: the replacement starts unlocked. It gets a
+        settings restore for the replacement to fetch: a snapshot of its latest
+        backup and of its admin code status and code, or the data of a restore
+        still pending on it, under a new ID. The record the replacement
         leaves behind, its HA device, entities and entries are removed.
         Returns the target's key and its device name from before.
 
@@ -1065,6 +1079,7 @@ class BNGntManagedDeviceRegistry:
         )
         self._sync_ha_device(managed_device_id)
         self._admin_codes.keep_on_replace(replacement_key, managed_device_id)
+        self._app_lock_pins.remove_on_replace(replacement_key, managed_device_id)
         self._settings_backups.on_replace(
             replacement_key,
             managed_device_id,
@@ -1086,7 +1101,8 @@ class BNGntManagedDeviceRegistry:
         return managed_device_id, previous_device_name
 
     def delete_device(self, key: str, *, remove_ha_device: bool = True) -> bool:
-        """Forget an offline managed device and its admin code and backup entries.
+        """Forget an offline managed device and its admin code, Device Lock PIN
+        and backup entries.
 
         Returns False if there is none. Pass ``remove_ha_device=False`` from
         HA's Delete button, where HA removes the device and its entities itself
@@ -1102,6 +1118,7 @@ class BNGntManagedDeviceRegistry:
 
         self._forget_device(key)
         self._admin_codes.remove(key)
+        self._app_lock_pins.remove(key)
         self._settings_backups.remove(key)
         if remove_ha_device:
             self._remove_ha_device(key)

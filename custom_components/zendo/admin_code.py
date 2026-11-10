@@ -5,7 +5,8 @@ The device reports its code, or that it has none, whenever it changes and at
 every connection. The hub keeps the last report, so the code can be looked up
 while the device is offline. ``admin_code_lookup`` and
 ``async_send_admin_code`` are shared with the ``zendo/v2/`` admin commands in
-``device_api.py``. See docs/managed-devices.md, "Admin Code".
+``device_api.py``. ``BNGntReportedCodeStore`` is shared with the Device Lock
+PIN's store in ``app_lock_pin.py``. See docs/managed-devices.md, "Admin Code".
 
 A code must never reach a log line, an error message, an entity, an attribute,
 a state, an event or ``_serialize_managed_device``. Only its status does: the
@@ -16,10 +17,9 @@ Validation that fails on a code is done in the handlers with fixed messages.
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import Any
 
 import voluptuous as vol
 
@@ -49,10 +49,13 @@ from .managed_devices import (
     _resolve_devices_for_command,
     async_get_ha_device,
 )
+from .reported_codes import CodeStatus, ReportedCodeBook, is_valid_code
 from .v1_rules import V1_REFUSED_RESULT, is_v1_refused
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.managed_device_admin_codes"
+# The code's name in each entry of the store.
+ADMIN_CODE_FIELD = "code"
 
 WS_TYPE_REPORT_ADMIN_CODE = f"{DOMAIN}/report_managed_device_admin_code"
 
@@ -64,132 +67,65 @@ ADMIN_CODE_METHOD = "adminCode.set"
 JSONRPC_INVALID_PARAMS = -32602
 JSONRPC_NOT_SUPPORTED = -32001
 
-# The app and the Homey app know the same three, so keep all three in sync.
-STATUS_SET = "set"
-STATUS_NOT_SET = "not_set"
-STATUS_UNKNOWN = "unknown"
-ADMIN_CODE_STATUSES = (STATUS_SET, STATUS_NOT_SET, STATUS_UNKNOWN)
-
-AdminCodeStatus = Literal["set", "not_set", "unknown"]
-
-_ADMIN_CODE_PATTERN = re.compile(r"[0-9]{4}|[0-9]{6}|[0-9]{8}")
-
 INVALID_ADMIN_CODE_MESSAGE = "The admin code must be exactly 4, 6 or 8 digits."
 INVALID_REPORTED_ADMIN_CODE_MESSAGE = "admin_code must be exactly 4, 6 or 8 digits, or null"
-
-
-def is_valid_admin_code(value: Any) -> bool:
-    """Return whether ``value`` is 4, 6 or 8 ASCII digits."""
-    return isinstance(value, str) and _ADMIN_CODE_PATTERN.fullmatch(value) is not None
 
 
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
 
-class BNGntAdminCodeEntry(TypedDict):
-    """The last admin code a managed device reported."""
+class BNGntReportedCodeStore:
+    """The hub's copy of a code each managed device reports, by managed device ID.
 
-    # None: the device reported that it has no admin code.
-    code: str | None
-    # ISO 8601, UTC: when the device last reported it.
-    reported_at: str
-
-
-def admin_code_status(entry: BNGntAdminCodeEntry | None) -> AdminCodeStatus:
-    """Return the status an entry reads as: no entry is unknown."""
-    if entry is None:
-        return STATUS_UNKNOWN
-    return STATUS_SET if entry["code"] is not None else STATUS_NOT_SET
-
-
-def _restored_entry(value: Any) -> BNGntAdminCodeEntry | None:
-    if not isinstance(value, dict):
-        return None
-    code = value.get("code")
-    reported_at = value.get("reported_at")
-    if not (code is None or is_valid_admin_code(code)):
-        return None
-    if not isinstance(reported_at, str):
-        return None
-    return {"code": code, "reported_at": reported_at}
-
-
-class BNGntAdminCodeStore:
-    """The hub's copy of each managed device's admin code.
-
-    Keyed by managed device ID. Kept in its own store, a file only its owner
-    can read, rather than in the config entry's data.
-
-    No entry for a record: its device hasn't reported (status unknown). An
-    entry whose code is None: its device has no admin code (status not_set).
+    ``ReportedCodeBook`` in its own store, a file only its owner can read,
+    rather than in the config entry's data. ``field`` names the code in each
+    entry.
     """
 
-    def __init__(self, hass: HomeAssistant) -> None:
-        self._store: Store[dict[str, BNGntAdminCodeEntry]] = Store(
-            hass, STORAGE_VERSION, STORAGE_KEY, private=True, atomic_writes=True
+    def __init__(self, hass: HomeAssistant, storage_key: str, field: str) -> None:
+        self._store: Store[dict[str, dict[str, str | None]]] = Store(
+            hass, STORAGE_VERSION, storage_key, private=True, atomic_writes=True
         )
-        self._entries: dict[str, BNGntAdminCodeEntry] = {}
+        self._field = field
+        self._book = ReportedCodeBook(field)
         self._dirty = False
         self._closed = False
 
     async def async_load(self, managed_device_ids: Iterable[str]) -> None:
         """Load the entries, dropping any whose record is gone."""
-        data = await self._store.async_load()
-        if not isinstance(data, dict):
-            data = {}
-
-        known = set(managed_device_ids)
-        self._entries = {}
-        for key, value in data.items():
-            entry = _restored_entry(value)
-            if key in known and entry is not None:
-                self._entries[key] = entry
-
-        if len(self._entries) != len(data):
+        self._book, dropped = ReportedCodeBook.from_data(
+            self._field, await self._store.async_load(), managed_device_ids
+        )
+        if dropped:
             self._schedule_save()
 
     async def async_close(self) -> None:
         """Write a pending change now, and take no more.
 
         Called on unload, so that no write, from a call still under way or at
-        Home Assistant's final write, can land after ``async_remove_store`` has
-        removed the file, or over the one the next setup loads.
+        Home Assistant's final write, can land after the file is removed, or
+        over the one the next setup loads.
         """
         self._closed = True
         if self._dirty:
             await self._store.async_save(self._data_to_save())
 
-    def get(self, key: str) -> BNGntAdminCodeEntry | None:
-        return self._entries.get(key)
+    def get(self, key: str) -> dict[str, str | None] | None:
+        return self._book.get(key)
 
-    def status(self, key: str) -> AdminCodeStatus:
-        return admin_code_status(self._entries.get(key))
+    def status(self, key: str) -> CodeStatus:
+        return self._book.status(key)
 
     @callback
     def report(self, key: str, code: str | None) -> None:
-        """Keep what a device reported: its code, or None for no code."""
-        self._entries[key] = {
-            "code": code,
-            "reported_at": dt_util.utcnow().isoformat(),
-        }
+        """Keep what a device reported: its code, or None for none."""
+        self._book.report(key, code, dt_util.utcnow().isoformat())
         self._schedule_save()
 
     @callback
     def remove(self, key: str) -> None:
-        if self._entries.pop(key, None) is not None:
-            self._schedule_save()
-
-    @callback
-    def keep_on_replace(self, replacement_key: str, target_key: str) -> None:
-        """Settle the target's entry when the replacement takes it over.
-
-        The old device's code state wins, a code, none or unknown: the target
-        keeps its own entry, or stays without one, and the settings restore
-        hands that state to the replacement. The replacement's entry is never
-        moved to the target: it goes with the record it leaves behind.
-        """
-        if self._entries.pop(replacement_key, None) is not None:
+        if self._book.remove(key):
             self._schedule_save()
 
     @callback
@@ -200,14 +136,42 @@ class BNGntAdminCodeStore:
         self._store.async_delay_save(self._data_to_save)
 
     @callback
-    def _data_to_save(self) -> dict[str, BNGntAdminCodeEntry]:
+    def _data_to_save(self) -> dict[str, dict[str, str | None]]:
         self._dirty = False
-        return dict(self._entries)
+        return self._book.to_data()
+
+
+class BNGntAdminCodeStore(BNGntReportedCodeStore):
+    """The hub's copy of each managed device's admin code.
+
+    Each entry is ``{"code": <the code, or None>, "reported_at": ...}``. No
+    entry for a record: its device hasn't reported (status unknown). An entry
+    whose code is None: its device has no admin code (status not_set).
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        super().__init__(hass, STORAGE_KEY, ADMIN_CODE_FIELD)
+
+    @callback
+    def keep_on_replace(self, replacement_key: str, target_key: str) -> None:
+        """Settle the target's entry when the replacement takes it over.
+
+        The old device's code state wins, a code, none or unknown: the target
+        keeps its own entry, or stays without one, and the settings restore
+        hands that state to the replacement. The replacement's entry is never
+        moved to the target: it goes with the record it leaves behind.
+        """
+        self.remove(replacement_key)
+
+
+async def async_remove_reported_code_store(hass: HomeAssistant, storage_key: str) -> None:
+    """Remove a ``BNGntReportedCodeStore``'s file, when the config entry is removed."""
+    await Store(hass, STORAGE_VERSION, storage_key, private=True).async_remove()
 
 
 async def async_remove_store(hass: HomeAssistant) -> None:
     """Remove the store's file, when the config entry is removed."""
-    await Store(hass, STORAGE_VERSION, STORAGE_KEY, private=True).async_remove()
+    await async_remove_reported_code_store(hass, STORAGE_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +226,7 @@ def ws_report_managed_device_admin_code(
         return
 
     code = msg["admin_code"]
-    if code is not None and not is_valid_admin_code(code):
+    if code is not None and not is_valid_code(code):
         connection.send_error(
             msg["id"], websocket_api.ERR_INVALID_FORMAT, INVALID_REPORTED_ADMIN_CODE_MESSAGE
         )
@@ -305,8 +269,8 @@ def admin_code_lookup(
     if entry is None:
         return dict(UNKNOWN_ADMIN_CODE_LOOKUP)
     return {
-        "status": admin_code_status(entry),
-        "admin_code": entry["code"],
+        "status": registry.admin_codes.status(key),
+        "admin_code": entry[ADMIN_CODE_FIELD],
         "reported_at": entry["reported_at"],
     }
 
@@ -430,7 +394,7 @@ def _code_from_call(call: ServiceCall) -> str | None:
             "Write the admin code as text: in YAML, put it in quotes, "
             "so that a code that starts with 0 keeps its zeros."
         )
-    if not is_valid_admin_code(code):
+    if not is_valid_code(code):
         raise ServiceValidationError(INVALID_ADMIN_CODE_MESSAGE)
     return code
 

@@ -75,22 +75,28 @@ SUPPORTED_SCHEMES = (SCHEME_ECIES_P256,)
 MUST_ENCRYPT_METHODS = frozenset({"adminCode.set", "app.lock"})
 
 # The methods named in a sealed answer's additional data: the settings restore,
-# an admin's lookup of a managed device's admin code, and reading or claiming
-# the site config encryption key. The Zendo app and the Homey app use the same
-# strings.
+# an admin's lookup of a managed device's admin code or Device Lock PIN, and
+# reading or claiming the site config encryption key. The Zendo app and the
+# Homey app use the same strings.
 SEALED_METHOD_SETTINGS_RESTORE = "settingsRestore.get"
 SEALED_METHOD_ADMIN_CODE_GET = "adminCode.get"
+SEALED_METHOD_APP_LOCK_PIN_GET = "appLockPin.get"
 SEALED_METHOD_ENCRYPTION_KEY_GET = "encryptionKey.get"
 
 # The padded JSON of a sealed object or an encrypted envelope is a multiple of
 # this. The app pads to the same size, so keep the two in sync.
 SEALED_PAYLOAD_BLOCK_BYTES = 512
 
-# An admin's lookup of an admin code when there's none to hand out, before it's
-# sealed.
+# An admin's lookup of an admin code, or of a Device Lock PIN, when there's
+# none to hand out, before it's sealed.
 UNKNOWN_ADMIN_CODE_LOOKUP: dict[str, Any] = {
     "status": "unknown",
     "admin_code": None,
+    "reported_at": None,
+}
+UNKNOWN_APP_LOCK_PIN_LOOKUP: dict[str, Any] = {
+    "status": "unknown",
+    "pin": None,
     "reported_at": None,
 }
 
@@ -1048,6 +1054,18 @@ def seal(
     )
 
 
+def _lookup_for_attached_device(
+    lookup: dict[str, Any],
+    unknown: dict[str, Any],
+    book: RegistrationBook,
+    profile_id: str,
+    device_id: str,
+) -> dict[str, Any]:
+    if book.find_by_device(profile_id, device_id) is not None:
+        return lookup
+    return dict(unknown)
+
+
 def admin_code_lookup_for_attached_device(
     lookup: dict[str, Any],
     book: RegistrationBook,
@@ -1061,9 +1079,23 @@ def admin_code_lookup_for_attached_device(
     with it: for any other, the answer reads as if the device had never
     reported, whatever the store holds.
     """
-    if book.find_by_device(profile_id, device_id) is not None:
-        return lookup
-    return dict(UNKNOWN_ADMIN_CODE_LOOKUP)
+    return _lookup_for_attached_device(
+        lookup, UNKNOWN_ADMIN_CODE_LOOKUP, book, profile_id, device_id
+    )
+
+
+def app_lock_pin_lookup_for_attached_device(
+    lookup: dict[str, Any],
+    book: RegistrationBook,
+    profile_id: str,
+    device_id: str,
+) -> dict[str, Any]:
+    """Return what an admin's Device Lock PIN lookup answers for a record's
+    stored ``lookup``, by the rule of ``admin_code_lookup_for_attached_device``.
+    """
+    return _lookup_for_attached_device(
+        lookup, UNKNOWN_APP_LOCK_PIN_LOOKUP, book, profile_id, device_id
+    )
 
 
 def seal_settings_restore(
@@ -1093,6 +1125,37 @@ def seal_settings_restore(
     return {**result, "restore": restore}
 
 
+def _seal_field_to_caller(
+    result: dict[str, Any],
+    field: str,
+    method: str,
+    claims: TokenClaims,
+    one_off_key: ec.EllipticCurvePrivateKey | None,
+    nonce: bytes | None,
+) -> dict[str, Any]:
+    """Move ``field`` out of an admin's answer into a sealed object for ``method``.
+
+    Sealed to the encryption public key in the caller's checked token, for the
+    caller's own profile and device, which opens it. The answer always gets its
+    sealed object, holding ``field`` whether it's a value or null. Raises
+    ``TokenError`` with ``public_key_required`` when the token carries no
+    P-256 public key.
+    """
+    public_key = token_public_key(claims)
+    answer = dict(result)
+    value = answer.pop(field, None)
+    answer["sealed"] = seal_to(
+        {field: value},
+        public_key,
+        claims.profile_id,
+        claims.device_id,
+        method,
+        one_off_key=one_off_key,
+        nonce=nonce,
+    )
+    return answer
+
+
 def seal_admin_code_answer(
     result: dict[str, Any],
     claims: TokenClaims,
@@ -1108,19 +1171,27 @@ def seal_admin_code_answer(
     ``TokenError`` with ``public_key_required`` when the token carries no
     P-256 public key.
     """
-    public_key = token_public_key(claims)
-    answer = dict(result)
-    admin_code = answer.pop("admin_code", None)
-    answer["sealed"] = seal_to(
-        {"admin_code": admin_code},
-        public_key,
-        claims.profile_id,
-        claims.device_id,
-        SEALED_METHOD_ADMIN_CODE_GET,
-        one_off_key=one_off_key,
-        nonce=nonce,
+    return _seal_field_to_caller(
+        result, "admin_code", SEALED_METHOD_ADMIN_CODE_GET, claims, one_off_key, nonce
     )
-    return answer
+
+
+def seal_app_lock_pin_answer(
+    result: dict[str, Any],
+    claims: TokenClaims,
+    *,
+    one_off_key: ec.EllipticCurvePrivateKey | None = None,
+    nonce: bytes | None = None,
+) -> dict[str, Any]:
+    """Move a Device Lock PIN answer's ``pin`` into a sealed object.
+
+    Sealed for ``appLockPin.get`` as ``seal_admin_code_answer`` seals for
+    ``adminCode.get``: to the caller's token, always, holding ``pin`` whether
+    it's a PIN or null. Raises ``TokenError`` with ``public_key_required``.
+    """
+    return _seal_field_to_caller(
+        result, "pin", SEALED_METHOD_APP_LOCK_PIN_GET, claims, one_off_key, nonce
+    )
 
 
 # ---------------------------------------------------------------------------

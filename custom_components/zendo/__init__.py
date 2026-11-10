@@ -32,6 +32,10 @@ from .admin_code import (
     ws_report_managed_device_admin_code,
 )
 from .api_client import fetch_profiles, send_notification
+from .app_lock_pin import (
+    BNGntAppLockPinStore,
+    async_remove_store as async_remove_app_lock_pin_store,
+)
 from .device_api import BNGntDeviceAuth, async_register_commands as async_register_v2_commands
 from .device_control_backend_keys import (
     BNGntSigningKeys,
@@ -380,10 +384,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     managed_device_ids = list(entry.data.get(CONF_MANAGED_DEVICES, {}))
     admin_codes = BNGntAdminCodeStore(hass)
     await admin_codes.async_load(managed_device_ids)
+    app_lock_pins = BNGntAppLockPinStore(hass)
+    await app_lock_pins.async_load(managed_device_ids)
     settings_backups = BNGntSettingsBackupStore(hass)
     await settings_backups.async_load(managed_device_ids)
 
-    registry = BNGntManagedDeviceRegistry(hass, entry, admin_codes, settings_backups)
+    registry = BNGntManagedDeviceRegistry(
+        hass, entry, admin_codes, app_lock_pins, settings_backups
+    )
     hass.data[DOMAIN]["managed_device_registry"] = registry
     await registry.async_start()
 
@@ -936,6 +944,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if registry:
             registry.stop()
             await registry.admin_codes.async_close()
+            await registry.app_lock_pins.async_close()
             await registry.settings_backups.async_close()
 
         device_auth: BNGntDeviceAuth | None = hass.data[DOMAIN].pop("device_auth", None)
@@ -963,13 +972,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove the stores kept for the entry.
 
-    The admin codes, the settings backups and their restores, the device
-    registrations with the tombstones and the admin-registered flag, the signing
-    keys and the site config encryption key's copy. Home Assistant removes the
-    rest with the entry: its data, which holds the link, the push token and the
-    managed device records, and its devices and entities. Added again, it's
-    unlinked until an admin links it, and every device registers again. See
-    docs/managed-devices.md, "Moving to Another Property or Starting Over".
+    The admin codes, the Device Lock PINs, the settings backups and their
+    restores, the device registrations with the tombstones and the
+    admin-registered flag, the signing keys and the site config encryption
+    key's copy. Home Assistant removes the rest with the entry: its data, which
+    holds the link, the push token and the managed device records, and its
+    devices and entities. Added again, it's unlinked until an admin links it,
+    and every device registers again. See docs/managed-devices.md, "Moving to
+    Another Property or Starting Over".
     """
     # Still open when the unload failed: closed first, so that none of them
     # writes its file again.
@@ -979,6 +989,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     )
     if registry is not None:
         await registry.admin_codes.async_close()
+        await registry.app_lock_pins.async_close()
         await registry.settings_backups.async_close()
     device_auth: BNGntDeviceAuth | None = domain_data.get("device_auth")
     if device_auth is not None:
@@ -986,6 +997,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await device_auth.encryption_key.async_close()
 
     await async_remove_admin_code_store(hass)
+    await async_remove_app_lock_pin_store(hass)
     await async_remove_settings_backup_store(hass)
     await async_remove_registration_store(hass)
     await async_remove_signing_keys_store(hass)

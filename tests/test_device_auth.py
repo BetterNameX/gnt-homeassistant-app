@@ -18,6 +18,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import serialization
@@ -795,6 +796,122 @@ class AdminCodeAnswerTest(unittest.TestCase):
         )
 
 
+class AppLockPinAnswerTest(unittest.TestCase):
+    """``zendo/v2/get_managed_device_app_lock_pin``'s answer, sealed to the caller's token."""
+
+    ADDITIONAL_DATA = "sealed\nprofile_vectors_1\ndevice_vectors_1\nappLockPin.get"
+
+    def _open(self, additional_data, data):
+        return json.loads(
+            device_auth.ecies_decrypt(
+                _device_private_key(), additional_data.encode(), data
+            ).decode()
+        )
+
+    def test_the_method_label(self):
+        self.assertEqual(device_auth.SEALED_METHOD_APP_LOCK_PIN_GET, "appLockPin.get")
+
+    def test_it_opens_with_the_callers_key_under_its_additional_data(self):
+        claims = _token_claims("valid-admin")
+        self.assertTrue(claims.admin)
+        result = {
+            "success": True,
+            "status": "set",
+            "pin": "135790",
+            "reported_at": "2026-11-10T09:30:00.123456+00:00",
+        }
+        answer = device_auth.seal_app_lock_pin_answer(result, claims)
+        self.assertEqual(
+            answer,
+            {
+                "success": True,
+                "status": "set",
+                "reported_at": "2026-11-10T09:30:00.123456+00:00",
+                "sealed": answer["sealed"],
+            },
+        )
+        self.assertEqual(answer["sealed"]["scheme"], device_auth.SCHEME_ECIES_P256)
+        self.assertEqual(
+            device_auth.sealed_additional_data(
+                claims.profile_id, claims.device_id, device_auth.SEALED_METHOD_APP_LOCK_PIN_GET
+            ),
+            self.ADDITIONAL_DATA.encode(),
+        )
+        self.assertEqual(
+            self._open(self.ADDITIONAL_DATA, answer["sealed"]["data"]), {"pin": "135790"}
+        )
+        self.assertEqual(result["pin"], "135790")
+
+    def test_every_pin_length_opens_to_the_pin(self):
+        claims = _token_claims("valid-admin")
+        for pin in ("0000", "012345", "98765432"):
+            with self.subTest(pin):
+                answer = device_auth.seal_app_lock_pin_answer(
+                    {"success": True, "status": "set", "pin": pin, "reported_at": "t"}, claims
+                )
+                self.assertEqual(
+                    self._open(self.ADDITIONAL_DATA, answer["sealed"]["data"]), {"pin": pin}
+                )
+
+    def test_no_pin_still_comes_sealed(self):
+        claims = _token_claims("valid-admin")
+        for status, reported_at in (
+            ("not_set", "2026-11-10T09:31:12.000000+00:00"),
+            ("unknown", None),
+        ):
+            with self.subTest(status):
+                answer = device_auth.seal_app_lock_pin_answer(
+                    {"success": True, "status": status, "pin": None, "reported_at": reported_at},
+                    claims,
+                )
+                self.assertNotIn("pin", answer)
+                self.assertEqual(answer["status"], status)
+                self.assertEqual(answer["reported_at"], reported_at)
+                self.assertEqual(
+                    self._open(self.ADDITIONAL_DATA, answer["sealed"]["data"]), {"pin": None}
+                )
+
+    def test_it_doesnt_open_as_an_admin_code_and_an_admin_code_doesnt_open_as_it(self):
+        claims = _token_claims("valid-admin")
+        pin_answer = device_auth.seal_app_lock_pin_answer(
+            {"success": True, "status": "set", "pin": "2468", "reported_at": "t"}, claims
+        )
+        code_answer = device_auth.seal_admin_code_answer(
+            {"success": True, "status": "set", "admin_code": "2468", "reported_at": "t"}, claims
+        )
+        for sealed, other_method in (
+            (pin_answer["sealed"], device_auth.SEALED_METHOD_ADMIN_CODE_GET),
+            (code_answer["sealed"], device_auth.SEALED_METHOD_APP_LOCK_PIN_GET),
+        ):
+            with self.subTest(other_method):
+                aad = device_auth.sealed_additional_data(
+                    "profile_vectors_1", "device_vectors_1", other_method
+                )
+                with self.assertRaises(InvalidTag):
+                    device_auth.ecies_decrypt(_device_private_key(), aad, sealed["data"])
+
+    def test_it_doesnt_open_for_another_device(self):
+        answer = device_auth.seal_app_lock_pin_answer(
+            {"success": True, "status": "set", "pin": "2468", "reported_at": "t"},
+            _token_claims("valid-admin"),
+        )
+        aad = device_auth.sealed_additional_data(
+            "profile_vectors_1", "device_vectors_2", device_auth.SEALED_METHOD_APP_LOCK_PIN_GET
+        )
+        with self.assertRaises(InvalidTag):
+            device_auth.ecies_decrypt(_device_private_key(), aad, answer["sealed"]["data"])
+
+    def test_a_token_without_a_p256_key_is_public_key_required(self):
+        for name in ("valid-no-public-key", "valid-public-key-not-p256"):
+            with self.subTest(name):
+                with self.assertRaises(device_auth.TokenError) as err:
+                    device_auth.seal_app_lock_pin_answer(
+                        {"success": True, "status": "unknown", "pin": None, "reported_at": None},
+                        _token_claims(name),
+                    )
+                self.assertEqual(err.exception.code, device_auth.ERROR_PUBLIC_KEY_REQUIRED)
+
+
 class RegistrationBookTest(unittest.TestCase):
     PUBLIC_KEY = VECTORS["device"]["encryptionKey"]["publicKeySpkiBase64"]
 
@@ -1146,6 +1263,92 @@ class AdminCodeLookupTest(unittest.TestCase):
         self.assertEqual(json.loads(opened), {"admin_code": None})
 
 
+class AppLockPinLookupTest(unittest.TestCase):
+    STORED: ClassVar[dict] = {
+        "status": "set",
+        "pin": "135790",
+        "reported_at": "2026-11-10T09:30:00+00:00",
+    }
+    UNKNOWN: ClassVar[dict] = {"status": "unknown", "pin": None, "reported_at": None}
+
+    def _book(self):
+        book = device_auth.RegistrationBook()
+        book.register(
+            "p1",
+            "d1",
+            admin=False,
+            public_key=VECTORS["device"]["encryptionKey"]["publicKeySpkiBase64"],
+            now=NOW,
+        )
+        return book
+
+    def _lookup(self, book, profile_id, device_id, stored=None):
+        return device_auth.app_lock_pin_lookup_for_attached_device(
+            stored or self.STORED, book, profile_id, device_id
+        )
+
+    def test_a_registered_device_reads_what_the_store_holds(self):
+        self.assertEqual(self._lookup(self._book(), "p1", "d1"), self.STORED)
+        not_set = {**self.STORED, "status": "not_set", "pin": None}
+        self.assertEqual(self._lookup(self._book(), "p1", "d1", not_set), not_set)
+
+    def test_a_device_that_hasnt_registered_reads_as_unknown(self):
+        self.assertEqual(self._lookup(self._book(), "p1", "d2"), self.UNKNOWN)
+        self.assertEqual(self._lookup(self._book(), "p2", "d1"), self.UNKNOWN)
+        self.assertEqual(
+            self._lookup(device_auth.RegistrationBook(), "p1", "d1"), self.UNKNOWN
+        )
+
+    def test_a_revoked_device_reads_as_unknown(self):
+        book = self._book()
+        book.revoke("p1", "d1", NOW)
+        self.assertEqual(self._lookup(book, "p1", "d1"), self.UNKNOWN)
+
+    def test_the_answer_isnt_the_shared_constant(self):
+        answer = self._lookup(self._book(), "p1", "d2")
+        answer["status"] = "set"
+        self.assertEqual(device_auth.UNKNOWN_APP_LOCK_PIN_LOOKUP, self.UNKNOWN)
+
+    def test_it_never_reads_as_an_admin_code(self):
+        self.assertNotIn("admin_code", self._lookup(self._book(), "p1", "d2"))
+        self.assertNotIn(
+            "pin",
+            device_auth.admin_code_lookup_for_attached_device(
+                {"status": "set", "admin_code": "246810", "reported_at": "t"},
+                self._book(),
+                "p1",
+                "d2",
+            ),
+        )
+
+    def test_it_seals_a_null_pin(self):
+        device = VECTORS["device"]
+        private_key = serialization.load_pem_private_key(
+            device["encryptionKey"]["privateKeyPkcs8Pem"].encode(), password=None
+        )
+        claims = device_auth.TokenClaims(
+            site_id=SITE_ID,
+            profile_id="admin-profile",
+            device_id="admin-device",
+            admin=True,
+            encryption_public_key=device["encryptionKey"]["publicKeySpkiBase64"],
+        )
+        answer = device_auth.seal_app_lock_pin_answer(
+            {"success": True, **self._lookup(self._book(), "p1", "d2")}, claims
+        )
+        self.assertEqual(answer["status"], "unknown")
+        self.assertIsNone(answer["reported_at"])
+        self.assertNotIn("pin", answer)
+        opened = device_auth.ecies_decrypt(
+            private_key,
+            device_auth.sealed_additional_data(
+                "admin-profile", "admin-device", device_auth.SEALED_METHOD_APP_LOCK_PIN_GET
+            ),
+            answer["sealed"]["data"],
+        )
+        self.assertEqual(json.loads(opened), {"pin": None})
+
+
 class HeldEncryptionKeyTest(unittest.TestCase):
     """Which site config encryption key is held: the store's, the helper's, or none."""
 
@@ -1317,6 +1520,9 @@ class SealedPaddingTest(unittest.TestCase):
                 {"restore": _SHORT_SECRET}, registration
             )["restore"]["sealed"],
             "admin code": device_auth.seal_admin_code_answer(_SHORT_SECRET, claims)["sealed"],
+            "app lock pin": device_auth.seal_app_lock_pin_answer(
+                {"pin": "48291537"}, claims
+            )["sealed"],
             "encryption key read": device_auth.encryption_key_answer("the key", registration)[
                 "sealed"
             ],
