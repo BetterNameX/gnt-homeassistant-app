@@ -10,7 +10,11 @@ Read these files for project details:
 - [docs/push-notifications-deep-linking.md](docs/push-notifications-deep-linking.md): push
   notifications and their deep links.
 - [docs/managed-devices.md](docs/managed-devices.md): managed devices (Always-On Display):
-  records and their opaque managed device IDs, online status and the offline reason, the
+  records and their opaque managed device IDs, online status and the offline reason,
+  `online_since` and what a restart does to it (a record restored awaiting its device until the
+  restart window closes), the status history (its store, what's recorded and when it isn't, the
+  `connect_cause` the v2 register takes, merging, the 3 days kept and the 50-entry backstop, and
+  the admin command `zendo/v2/get_managed_device_status_history`), the
   state the app reports, the `bngnt_managed_device_updated` / `_removed` / `_replaced`
   events, the automation services and their JSON-RPC commands and errors, wall panel
   settings and presence (entities made only once a device reports them), the admin code

@@ -4,9 +4,9 @@
 
 A managed device is a phone, tablet or wall panel running the Zendo app with Always-On Display (Kiosk) on. It registers with Home Assistant so automations can control it: wake the screen, set the brightness or volume, lock it, and so on. Each managed device is a Home Assistant device with its own sensor entities (battery, screen, volume, locked and so on). A wall panel can also have auto-brightness, wake on approach and presence entities (see [Wall Panel Settings and Presence](#wall-panel-settings-and-presence)).
 
-The code lives in `custom_components/zendo/managed_devices.py`, the admin code in `admin_code.py` (see [Admin Code](#admin-code)), the Device Lock PIN in `app_lock_pin.py` (see [Device Lock PIN](#device-lock-pin)) and the settings backup in `settings_backup.py` (see [Settings Backup](#settings-backup)). The services and WebSocket commands are registered in `__init__.py`.
+The code lives in `custom_components/zendo/managed_devices.py`, the admin code in `admin_code.py` (see [Admin Code](#admin-code)), the Device Lock PIN in `app_lock_pin.py` (see [Device Lock PIN](#device-lock-pin)), the settings backup in `settings_backup.py` (see [Settings Backup](#settings-backup)) and the status history in `status_history.py` and `status_history_store.py` (see [Status History](#status-history)). The services and WebSocket commands are registered in `__init__.py`.
 
-From 2.0.0, a Zendo device registers with Home Assistant and calls the `zendo/v2/` WebSocket commands instead, in `device_api.py`: see [Device Registration (v2)](#device-registration-v2). The v1 services and commands below stay for devices on an older app, with the rules in [Older Apps (v1)](#older-apps-v1). Listing and replacing devices, fetching and completing a settings restore, an admin looking up a device's admin code, and reporting and looking up a Device Lock PIN, are `zendo/v2/` only.
+From 2.0.0, a Zendo device registers with Home Assistant and calls the `zendo/v2/` WebSocket commands instead, in `device_api.py`: see [Device Registration (v2)](#device-registration-v2). The v1 services and commands below stay for devices on an older app, with the rules in [Older Apps (v1)](#older-apps-v1). Listing and replacing devices, fetching and completing a settings restore, an admin looking up a device's admin code, reporting and looking up a Device Lock PIN, and reading a device's status history, are `zendo/v2/` only.
 
 ---
 
@@ -15,12 +15,12 @@ From 2.0.0, a Zendo device registers with Home Assistant and calls the `zendo/v2
 The integration owns each managed device. It keeps one **record** per managed device, keyed by a **managed device ID**:
 
 - The managed device ID is also the Home Assistant device identifier `(zendo, <managed device ID>)`, and the entities' unique IDs are `md_<managed device ID>_<property>`. Automations point at the Home Assistant device, so they follow the record.
-- The record holds the Zendo device that is **attached** to it right now: its `profile_id` and `device_id`, plus its name, model (and a wall panel's model slug, launcher ID and serial number), operating system and its version, app version, last state, whether it's online, why it's offline and when it was last seen.
+- The record holds the Zendo device that is **attached** to it right now: its `profile_id` and `device_id`, plus its name, model (and a wall panel's model slug, launcher ID and serial number), operating system and its version, app version, last state, whether it's online, since when, why it's offline and when it was last seen.
 - The attached device can change. A replacement tablet can take over a record (see [Replacing a Device](#replacing-a-device)), and the record keeps its managed device ID, Home Assistant device, entity IDs, area and the name the user gave it.
 
 **Managed device IDs are opaque.** Never build one from a profile ID and device ID, and never parse one. Records made before 1.9.0 have the ID `<profile_id>_<device_id>`, and new ones may have that form too, but a record's ID says nothing about the device attached to it now.
 
-Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. A record's admin code, Device Lock PIN and settings backup aren't: each has its own store (see [Admin Code](#admin-code), [Device Lock PIN](#device-lock-pin) and [Settings Backup](#settings-backup)). The persisted fields are the attached ids, the device info (including `device_os_version`, from 1.9.5 `device_model_slug`, and from 1.9.6 `device_launcher_id` and `device_serial_number`), the app version, `offline_reason`, `last_seen` and, from 1.9.3, `optional_entities` (see [Created When Reported](#created-when-reported)). The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets.
+Records are persisted in the config entry under `managed_devices`, keyed by managed device ID. A record's admin code, Device Lock PIN, settings backup and status history aren't: each has its own store (see [Admin Code](#admin-code), [Device Lock PIN](#device-lock-pin), [Settings Backup](#settings-backup) and [Status History](#status-history)). The persisted fields are the attached ids, the device info (including `device_os_version`, from 1.9.5 `device_model_slug`, and from 1.9.6 `device_launcher_id` and `device_serial_number`), the app version, `offline_reason`, `last_seen`, from 1.9.3 `optional_entities` (see [Created When Reported](#created-when-reported)) and from UNRELEASED `online_since`. The state and `online` are not persisted: after a restart every record starts offline, with its entities unavailable until the device sends its first heartbeat. See [Online Status](#online-status) for the reason a restored record gets, and [After a Restart](#after-a-restart) for what a restart records.
 
 `last_seen` is a Unix timestamp in seconds: when the device was last in touch with Home Assistant.
 
@@ -45,7 +45,34 @@ Every offline record has an `offline_reason`. It is `null` while the record is o
 - The reason is a plain string on the wire, not an enum, so a hub can add one without an app release. The registry only writes the values in `OFFLINE_REASONS`, and the app and the Homey app know the same values. Keep the three in sync.
 - `unregister_managed_device` records `unregistered` even when the record has already timed out, so a device whose Always-On Display was turned off after it lost its connection reads as not monitored rather than lost.
 - `zendo/v2/call_device` answers `target_offline` for every offline record except one with `unregistered`, whose device can still be connected. See [`zendo/v2/call_device`](#zendov2call_device).
-- After a restart, a record comes back with the reason it was persisted with. A record that was online when Home Assistant stopped has no reason, and nor does one persisted by an older version: both come back as `timeout`, as does any value the integration doesn't know.
+- After a restart, a record comes back with the reason it was persisted with. A record that was online when Home Assistant stopped has no reason, and nor does one persisted by an older version: both come back as `timeout`, as does any value the integration doesn't know. A record still awaiting its device after a restart is persisted with no reason too (see [After a Restart](#after-a-restart)).
+
+### Online Since
+
+From UNRELEASED. `online_since` is a Unix timestamp in seconds: when the record's device connected. It's `null` while the record is offline, and the list gives it in milliseconds (see [The List](#the-list-zendov2list_managed_devices)).
+
+- **A new record** gets now.
+- **A registration or a state update that brings an offline record back** sets it to now.
+- **A registration with a `connect_cause`** sets it to now, even on a record that's online: the device connected again, for example after a quick restart that came back before the offline check noticed (see [The Connect Cause](#the-connect-cause)).
+- **A registration without a `connect_cause` on an online record leaves it alone.** The device registers again while it stays connected: after a rename, after a replace, when Zendo Launcher's ids arrive. An older app never sends a cause, so with it `online_since` moves only when the record comes back from offline. A state update on an online record leaves it alone too.
+- **Going offline**, by the offline check or an unregister, sets it to `null`.
+- **A replace** gives the target the replacement's, with its `last_seen` (see [Replacing a Device](#replacing-a-device)).
+- **It's kept across a restart.** It's persisted with the record, and written when Home Assistant stops and when the integration unloads. A reload doesn't drop a device's connection, so its device may not register again: the record gets its `online_since` back when its device is next heard from (see [After a Restart](#after-a-restart)).
+- **It fires no event of its own.** It changes only where `bngnt_managed_device_updated` already fires (see [Events](#events)).
+
+### After a Restart
+
+Every record is restored offline, as above, but a reload or a restart doesn't mean its device lost contact. A record that was online when Home Assistant stopped is restored **awaiting its device**, with the `online_since` and `last_seen` it had, until the **restart window** closes, 180 seconds (the offline timeout) after Home Assistant has started. At a reload, that's when the integration starts. At a Home Assistant start, it's when Home Assistant has started, after every integration has set up. Until the window closes:
+
+- **The record shows offline**, with `offline_reason: timeout` and `online_since: null`, and its entities are unavailable, until its device is heard from, as for any restored record.
+- **Its device's state update, or a registration without a `connect_cause`,** brings it back online with the `online_since` it had before. A record persisted by a version before UNRELEASED has none, so it gets now.
+- **A registration with a `connect_cause`** sets `online_since` to now.
+- **The status history** treats the record as online all along: a restart its device rides out records only the `hub_started` entry (see [What's Recorded](#whats-recorded)).
+- **Persisting** writes the record as online, with no `offline_reason` and the `online_since` it had, so a second restart before its device comes back restores it awaiting again.
+
+Once the window closes with the device still not back, the record is no longer awaiting it: its history records `went_offline` with `reason: timeout` at its `last_seen`, the last heartbeat before the restart, and the record is persisted as offline. Nothing else changes: it was already offline. The offline check and each transition close it, so this is written within a minute of the window closing.
+
+A record that was offline when Home Assistant stopped isn't awaiting anything: a restart didn't drop its connection.
 
 ---
 
@@ -149,7 +176,7 @@ The last four are a wall panel's settings and presence sensor. Their entities ar
 | Code | Returned by | Meaning |
 |---|---|---|
 | `replacement_not_registered` | `zendo/v2/replace_managed_device` | No record has the replacement attached. It hasn't finished registering. |
-| `target_not_found` | `zendo/v2/replace_managed_device`, `zendo/v2/get_managed_device_admin_code`, `zendo/v2/configure_managed_device_admin_code`, `zendo/v2/get_managed_device_app_lock_pin` (from UNRELEASED) | No record has that managed device ID. |
+| `target_not_found` | `zendo/v2/replace_managed_device`, `zendo/v2/get_managed_device_admin_code`, `zendo/v2/configure_managed_device_admin_code`, `zendo/v2/get_managed_device_app_lock_pin` (from UNRELEASED), `zendo/v2/get_managed_device_status_history` | No record has that managed device ID. |
 | `target_online` | `zendo/v2/delete_managed_device` | The record's device is online, so it can't be deleted. |
 | `target_offline` (from 2.0.0) | `zendo/v2/configure_managed_device_admin_code` | The record's device is offline, so nothing was sent. |
 | `no_answer` (from 2.0.0) | `zendo/v2/configure_managed_device_admin_code` | The device didn't answer within 10 seconds, the command couldn't be sent, or the integration unloaded before the answer. It may still have made the change. |
@@ -182,6 +209,7 @@ managed_devices:
     online: true
     offline_reason: null
     last_seen: 1791763200000
+    online_since: 1791748800000
     state:
       battery_level: 82
       battery_state: "charging"
@@ -209,6 +237,7 @@ managed_devices:
     online: false
     offline_reason: "timeout"
     last_seen: 1791759600000
+    online_since: null
     state: null
     admin_code_status: "unknown"
 ```
@@ -219,6 +248,7 @@ managed_devices:
 - `device_launcher_id` and `device_serial_number`, from 1.9.6, are Zendo Launcher's ID for a wall panel and the panel's hardware serial number, each `null` while the app doesn't know it. See [A Wall Panel's Fields](#a-wall-panels-fields).
 - `offline_reason` is `timeout` or `unregistered` while the record is offline, and `null` while it's online. See [Online Status](#online-status).
 - `last_seen` is in milliseconds since the Unix epoch, or `null` when the device hasn't been seen since it was restored from a version before 1.9.0.
+- `online_since`, from UNRELEASED, is when the record's device connected, in milliseconds since the Unix epoch, and `null` while the record is offline. See [Online Since](#online-since).
 - `state` is the last state the device sent, exactly as it sent it, or `null` when it hasn't sent one since the record was made or Home Assistant started. An offline record keeps its last state until Home Assistant restarts.
 - `admin_code_status`, from 1.9.4, is `set`, `not_set` or `unknown`, with the same meaning as the `status` of `zendo/v2/get_managed_device_admin_code`. It comes from the admin code store, and is only the status, never the code, so a record whose attached device hasn't registered can list `set` or `not_set` while the lookup answers `unknown`. See [Admin Code](#admin-code).
 
@@ -257,6 +287,7 @@ A Device Lock PIN report never fires it: the record's state already says whether
 Notes:
 
 - **The signal drifts.** A change in `wifi_signal` alone never fires an event, because the signal changes from one heartbeat to the next. The app reads it from `zendo/v2/list_managed_devices`.
+- **`online_since` adds no trigger.** It changes only with a registration, a state update that brings a record back, an unregister of an online record, the offline check or a replace, which each fire `bngnt_managed_device_updated` already. The status history fires nothing (see [Status History](#status-history)).
 - **Removal is its own event.** That way, `bngnt_managed_device_updated` can always be parsed as a full list item, and an older app ignores an event it doesn't know.
 - **The app subscribes to `updated` and `removed` only while it shows device status.** Home Assistant sends an event type only to the WebSocket clients subscribed to it, so the integration can always fire them.
 - **A managed device listens for `replaced`**, and recognises itself by the event's ids, so it doesn't wait for its next heartbeat to find out it holds another record. The record's settings restore starts from there (see [Settings Backup](#settings-backup)).
@@ -827,6 +858,139 @@ The schema takes any value for `settings_backup`, and the handler checks it with
 
 ---
 
+## Status History
+
+From UNRELEASED. For each managed device record, the integration keeps what happened to its connection over the past 3 days, by day: when it went offline and why, when it came back and why, and when the integration started. The Zendo app shows it in a device's status on Control Panels, so an installer can tell a device that keeps dropping off from one that was off for a while. The Homey app keeps the same history with the same rules, with camelCase fields: keep the two in sync.
+
+The rules are in `status_history.py`, which has no Home Assistant import, so the tests load it on its own, and its store is in `status_history_store.py`. The registry tells it each record's transitions.
+
+None of it goes in a record, `_serialize_managed_device` (so never in `zendo/v2/list_managed_devices` or `bngnt_managed_device_updated`), an entity, an attribute, an event or a log line.
+
+### Entries
+
+Each entry is one event, or several of the same kind merged (see [Merging](#merging)):
+
+| Field | Value |
+|---|---|
+| `kind` | `went_offline`, `came_online` or `hub_started` |
+| `reason` | `went_offline` only: the offline reason, `timeout` or `unregistered`. `null` otherwise |
+| `cause` | `came_online` only: the registration's `connect_cause`, or `null` when a state update brought the record back or the registration had none. `null` otherwise |
+| `first_at` | When the entry's first event happened, in milliseconds since the Unix epoch |
+| `last_at` | When the entry's latest event happened. Equal to `first_at` for one event |
+| `count` | How many events the entry holds, 1 or more |
+
+### What's Recorded
+
+- **`went_offline`**
+  - when the offline check marks an online record offline: `reason: timeout`, at its `last_seen`, the last heartbeat, not when the check noticed;
+  - when an online record is unregistered, by its device or by a revoke: `reason: unregistered`, at now;
+  - when the restart window closes with a record still awaiting its device: `reason: timeout`, at its `last_seen` (see [After a Restart](#after-a-restart)).
+  - Nothing when a record that's already offline is unregistered.
+- **`came_online`**
+  - when a state update or a registration brings an offline record back online, with the registration's `connect_cause`, or `null`;
+  - when a registration with a `connect_cause` arrives for a record that's already online: a quick restart or reconnection that came back before the offline check noticed.
+  - Nothing for a registration without a `connect_cause` on an online record, or for a new record's first registration, where its history starts.
+  - Nothing, within the restart window, for a registration with `reconnected` for a record that was online when Home Assistant stopped, one awaiting its device: the restart dropped that connection, and the `hub_started` entry says so. Any other cause is recorded. A state update or a registration without a cause records nothing either, as for any online record. A record that was already offline before the restart is coming back for real, and its return is recorded whatever its cause.
+- **`hub_started`**: each time the integration starts, at a Home Assistant start or a reload. It's kept once for the whole hub, not for each record, and every record's answer has it.
+- **A replace records nothing.**
+
+So a restart never records `went_offline` for a device that was online before it and is back within the restart window.
+
+### The Connect Cause
+
+`zendo/v2/register_managed_device` takes an optional `connect_cause`: why the device is connecting. The v1 `register_managed_device` doesn't: its schema drops it. The app sends it on the first registration of each connection to Home Assistant, and on no other:
+
+| `connect_cause` | Meaning |
+|---|---|
+| `device_restarted` | The device itself restarted since Zendo last ran there. |
+| `zendo_restarted` | Zendo started again, and the device didn't restart. |
+| `reconnected` | Zendo kept running, and its connection to Home Assistant came back. |
+
+- **It's read loosely.** A string matching `^[a-z][a-z_]{0,31}$` is a cause, and anything else, `null` included, counts as none: a registration is never refused over it. A value the integration doesn't know is still a cause: it's kept as it came, and it sets `online_since`.
+- **It's kept only in the history**, as a `came_online` entry's `cause`: never on the record, in the list or in an event.
+- **It sets `online_since` to now**, even on a record that's online (see [Online Since](#online-since)).
+- Versions before UNRELEASED drop it as an unknown field, so the app sends it to every Home Assistant it registers with on v2, with no version check.
+
+### Merging
+
+So that a device that keeps restarting can't flood its history, before adding an event the integration looks for the record's most recent entry, not just its newest, with the same `kind` and the same `reason` or `cause`, on the same day. If the event is within 10 minutes of that entry's `last_at`, inclusive and either way, it's merged in: `count` goes up by 1, `last_at` becomes the later of the two and `first_at` the earlier. Otherwise it's a new entry. `hub_started` entries merge the same way among themselves.
+
+### Days
+
+- **A day is a date in Home Assistant's time zone**, read each time, so a change to the time zone regroups the entries at once. An entry belongs to the date of its `first_at`. Merging never crosses midnight, since it only looks at the same day.
+- **It keeps today and the 2 days before it.** Older entries are dropped whenever it writes and whenever it's read.
+- **At most 50 entries a record a day**, and at most 50 `hub_started` entries a day: past that, the day's oldest entry, by `last_at`, goes. An answer cuts each day to the newest 50 too, after putting the record's entries and the `hub_started` ones together. Merging keeps this from ever being reached.
+- An entry dated after today, after the clock went back across midnight, is kept, and is in no answer until its date is one of the 3.
+
+### History Storage
+
+The history is in its own store, `.storage/zendo.managed_device_status_history` (`Store` version 1), written like the admin codes' (see [Storage](#storage)): `private=True`, with atomic writes, loaded before the registry starts, and flushed when the integration unloads. A change is made in memory at once, and written with `async_delay_save` at most once a minute: the store keeps the earliest pending write, so changes in a busy minute don't push it back. Home Assistant's final write at stop saves a pending one. Losing the last minute on a crash is acceptable.
+
+```json
+{
+  "hub_started": [
+    {"kind": "hub_started", "reason": null, "cause": null, "first_at": 1793260800000, "last_at": 1793261040000, "count": 2}
+  ],
+  "records": {
+    "md_3f2a9c0e8b7d4c1e9a6f5b4d3c2e1f00": {
+      "recorded_since": 1793174400000,
+      "entries": [
+        {"kind": "went_offline", "reason": "timeout", "cause": null, "first_at": 1793264400000, "last_at": 1793264400000, "count": 1},
+        {"kind": "came_online", "reason": null, "cause": "device_restarted", "first_at": 1793264700000, "last_at": 1793264700000, "count": 1}
+      ]
+    }
+  }
+}
+```
+
+| When | The record's history |
+|---|---|
+| A record is created | Started, with `recorded_since` now and no entries. |
+| `unregister_managed_device` | Kept, with a `went_offline` entry when the record was online. |
+| `zendo/v2/delete_managed_device`, or the Delete button | Removed. |
+| A replace | The target keeps its own. The replacement's is removed with the record it leaves behind. |
+| Home Assistant starts | Dropped if the record is gone. A record with none starts one now: at the first start of UNRELEASED, every record does. Entries that aren't valid are dropped. |
+| The integration is removed | The file is removed, in `async_remove_entry`. |
+
+### `zendo/v2/get_managed_device_status_history`
+
+An admin command, like `zendo/v2/get_managed_device_admin_code`: it takes an admin-scoped token, as `device_control_backend_token`, and the record's `managed_device_id`, and checks the token as the other admin commands do, answering `not_linked`, `invalid_token`, `wrong_site`, `not_admin`, `device_revoked` or `unknown_api_key` (see [The v2 Commands](#the-v2-commands)). It isn't a service, so it fires no `call_service` event.
+
+```json
+{"id": 48, "type": "zendo/v2/get_managed_device_status_history", "device_control_backend_token": "<device control backend token>", "managed_device_id": "md_3f2a9c0e8b7d4c1e9a6f5b4d3c2e1f00"}
+```
+
+The result:
+
+```json
+{
+  "success": true,
+  "recorded_since": 1793174400000,
+  "days": [
+    {
+      "date": "2026-10-29",
+      "entries": [
+        {"kind": "came_online", "reason": null, "cause": "device_restarted", "first_at": 1793264700000, "last_at": 1793264700000, "count": 1},
+        {"kind": "went_offline", "reason": "timeout", "cause": null, "first_at": 1793264400000, "last_at": 1793264400000, "count": 1},
+        {"kind": "hub_started", "reason": null, "cause": null, "first_at": 1793260800000, "last_at": 1793261040000, "count": 2}
+      ]
+    },
+    {"date": "2026-10-28", "entries": []},
+    {"date": "2026-10-27", "entries": []}
+  ]
+}
+```
+
+- **`days`** is always exactly 3 days, today first, each with its `date` as `YYYY-MM-DD` in Home Assistant's time zone. Each day's `entries` are newest first by `last_at`, the `hub_started` ones among them, and of two at the same time, the one added later comes first. A day with nothing has `entries: []`.
+- **`recorded_since`** is when the integration started keeping this record's history, in milliseconds since the Unix epoch: the later of when the record was made and the first start of UNRELEASED. Before it there's no history, which isn't the same as no events. A `went_offline` recorded when the restart window closes is at the record's last heartbeat, which can be earlier, so `recorded_since` moves back to it: no entry is ever before `recorded_since`.
+- **It reads only the history** and sends nothing to the device, so it works while the device is offline. Reading drops the entries older than the 3 days, and saves when it dropped any.
+- **`target_not_found`** answers a `managed_device_id` that no record has.
+- A `managed_device_id` that's missing, empty or not a string fails with `invalid_format` and `Invalid managed_device_id`.
+- Nothing in the answer is sealed, so the token needs no encryption public key.
+- A version before UNRELEASED answers `unknown_command`. The Zendo app reads that as a Home Assistant that keeps no history.
+
+---
+
 ## Replacing a Device
 
 `zendo/v2/replace_managed_device` attaches the **replacement**, the device whose `profile_id` and `device_id` are in the call, to another record, the **target**, so the automations that control the target control the replacement instead. The call doesn't have to come from the replacement: an admin's phone can replace a wall panel. The replacement's own record is the one it **leaves behind**. It is synchronous, with no `await`, so no other call can change the records halfway through. From 2.0.0 there's no v1 `replace_managed_device`.
@@ -838,13 +1002,14 @@ For example, an admin replaces the panel "Hallway" with "Hallway 2". Hallway 2 i
 3. The replacement is already attached to the target: success, with no change and no events. A retry after a lost response is safe. `previous_device_name` is then the target's current name.
 4. Otherwise:
    - The target's device name, admin code status and code are read first, for the settings restore, before anything changes.
-   - The target takes the replacement's attached ids, device info (including `device_os_version`, `device_model_slug`, `device_launcher_id` and `device_serial_number`), app version, state, `online`, `offline_reason` and `last_seen`.
+   - The target takes the replacement's attached ids, device info (including `device_os_version`, `device_model_slug`, `device_launcher_id` and `device_serial_number`), app version, state, `online`, `offline_reason`, `last_seen` and `online_since`.
    - The target's Home Assistant device gets the replacement's name, model, serial number and app version. Its device ID, entity IDs, area and `name_by_user` stay.
    - The record the replacement leaves behind is removed, and so is its Home Assistant device. Home Assistant removes the device's entities with it.
    - The target's entities take the replacement's availability and state. The target keeps its optional entities, and gets any the replacement's state has a value for (see [Created When Reported](#created-when-reported)).
    - The old device's code state wins: the target keeps its admin code entry, `set` or `not_set`, or stays `unknown` without one, and never takes the replacement's (see [Admin Code](#admin-code)).
    - The target's Device Lock PIN entry is removed, and so is the replacement's: the new device starts unlocked, and reports once it has taken the record over (see [Device Lock PIN](#device-lock-pin)).
    - The target gets a settings restore, a snapshot of its latest backup and of its admin code status and code, for the replacement to fetch. The replacement's own backup entry is removed (see [Settings Backup](#settings-backup)).
+   - The target keeps its status history, and the replacement's is removed with the record it leaves behind. A replace records nothing in it (see [Status History](#status-history)).
    - `bngnt_managed_device_removed` fires for the record the replacement leaves behind, then `bngnt_managed_device_updated` for the target, with the `admin_code_status` it has after the replace, then `bngnt_managed_device_replaced`.
    - The response carries the target's managed device ID and `previous_device_name`, the target's device name from before, so the app can offer to give the replacement that name.
 
@@ -854,7 +1019,7 @@ An online target can be taken over: the app asks for a second confirmation, and 
 
 ## Deleting a Device
 
-Only offline managed devices can be deleted. Both ways go through `BNGntManagedDeviceRegistry.delete_device`, which removes the record's admin code entry (see [Admin Code](#admin-code)), its Device Lock PIN entry (see [Device Lock PIN](#device-lock-pin)) and its settings backup entry, pending restore included (see [Settings Backup](#settings-backup)), and fires `bngnt_managed_device_removed`.
+Only offline managed devices can be deleted. Both ways go through `BNGntManagedDeviceRegistry.delete_device`, which removes the record's admin code entry (see [Admin Code](#admin-code)), its Device Lock PIN entry (see [Device Lock PIN](#device-lock-pin)), its settings backup entry, pending restore included (see [Settings Backup](#settings-backup)), and its status history (see [Status History](#status-history)), and fires `bngnt_managed_device_removed`.
 
 - **`zendo/v2/delete_managed_device`** forgets the record and removes its Home Assistant device, and Home Assistant removes the device's entities with it. An unknown managed device ID returns `deleted: false`.
 - **The Delete button** on a managed device's page in Home Assistant calls `async_remove_config_entry_device` in `__init__.py`:
@@ -1004,7 +1169,7 @@ Each command takes its credential as a field, `api_key` or `device_control_backe
 | `zendo/v2/info` | none | none | `{version, linked, time_urls}` (see [The Time View](#the-time-view)) |
 | `zendo/v2/register_device` | `device_control_backend_token`, `encryption` | Device control backend token | See [Registering](#registering) |
 | `zendo/v2/subscribe_events` | `api_key` | API key | A subscription |
-| `zendo/v2/register_managed_device` | `api_key`, the fields of `register_managed_device` without the ids, and a wall panel's optional `device_model_slug`, `device_launcher_id` and `device_serial_number` (see [A Wall Panel's Fields](#a-wall-panels-fields)) | API key | `{success: true, managed_device_id, settings_restore_pending}` |
+| `zendo/v2/register_managed_device` | `api_key`, the fields of `register_managed_device` without the ids, a wall panel's optional `device_model_slug`, `device_launcher_id` and `device_serial_number` (see [A Wall Panel's Fields](#a-wall-panels-fields)), and from UNRELEASED an optional `connect_cause` (see [The Connect Cause](#the-connect-cause)) | API key | `{success: true, managed_device_id, settings_restore_pending}` |
 | `zendo/v2/unregister_managed_device` | `api_key` | API key | As `unregister_managed_device` |
 | `zendo/v2/update_managed_device_state` | `api_key`, `state` (an object, or a JSON-stringified one) | API key | `{success: true, registered, settings_restore_pending}` |
 | `zendo/v2/managed_device_command_response` | `api_key`, `response` (an object, or a JSON string) | API key | `{success: true}` |
@@ -1027,6 +1192,7 @@ Each command takes its credential as a field, `api_key` or `device_control_backe
 | `zendo/v2/get_managed_device_admin_code` | `device_control_backend_token`, `managed_device_id` | Admin-scoped token | `{success: true, status, reported_at, sealed}`, with `admin_code` in the sealed object, or `{success: false, error}` (see [Admin Commands (v2)](#admin-commands-v2)) |
 | `zendo/v2/get_managed_device_app_lock_pin` (from UNRELEASED) | `device_control_backend_token`, `managed_device_id` | Admin-scoped token | `{success: true, status, reported_at, sealed}`, with `pin` in the sealed object, or `{success: false, error}` (see [`zendo/v2/get_managed_device_app_lock_pin`](#zendov2get_managed_device_app_lock_pin)) |
 | `zendo/v2/configure_managed_device_admin_code` | `device_control_backend_token`, `managed_device_id`, and either `code` or `remove: true` | Admin-scoped token | `{success: true}` or `{success: false, error}` (see [Admin Commands (v2)](#admin-commands-v2)) |
+| `zendo/v2/get_managed_device_status_history` (from UNRELEASED) | `device_control_backend_token`, `managed_device_id` | Admin-scoped token | `{success: true, recorded_since, days}` or `{success: false, error}` (see [`zendo/v2/get_managed_device_status_history`](#zendov2get_managed_device_status_history)) |
 | `zendo/v2/set_deep_link_destinations` | `device_control_backend_token`, `destinations` (a list, or a JSON-stringified one) | Admin-scoped token | `{success: true}` |
 | `zendo/v2/notify_site_config_manifest_update` | `device_control_backend_token`, `payload` | Admin-scoped token | `{success: true}`, and `bngnt_site_config_manifest_updated` fires |
 | `zendo/v2/claim_encryption_key` | `device_control_backend_token`, `key` | Admin-scoped token | `{success: true, sealed}`, with the key it keeps as `key` in the sealed object, or `{success: false, error}` (see [The Site Config Encryption Key](#the-site-config-encryption-key)) |
@@ -1347,7 +1513,7 @@ The automation services, `send_notification`, `ring_doorbell`, `refresh_profiles
 
 ### Tests
 
-`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device` and `app_lock_pin_lookup_for_attached_device`, what an admin's lookup of an admin code or a Device Lock PIN answers for a device that hasn't registered, and what the PIN's sealed answer opens to, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_reported_codes.py` checks `reported_codes.py`, for the admin code store's field and the Device Lock PIN store's: which values are a code or a PIN (4, 6 or 8 ASCII digits), the statuses, reporting and removing, and which entries a load keeps. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
+`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device` and `app_lock_pin_lookup_for_attached_device`, what an admin's lookup of an admin code or a Device Lock PIN answers for a device that hasn't registered, and what the PIN's sealed answer opens to, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_reported_codes.py` checks `reported_codes.py`, for the admin code store's field and the Device Lock PIN store's: which values are a code or a PIN (4, 6 or 8 ASCII digits), the statuses, reporting and removing, and which entries a load keeps. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. `tests/test_status_history.py` checks `status_history.py` (see [Status History](#status-history)): reading `connect_cause`, merging, the split into days in the time zone, the 3 days kept on write, read and load, the 50-entry backstop, `online_since` after each kind of registration and state update, the restart window (no `went_offline` for a device back within it, `reconnected` and the other causes in it, when it opens and closes, and a record that was offline before the restart), records made, removed and replaced, the answer's shape and order, and loading what isn't valid. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -1366,10 +1532,11 @@ Home Assistant stays linked to the property it was first linked to, and there's 
 - push notifications: the push token, and the people and device group entities;
 - the managed devices, with their Home Assistant devices and entities, so the automations that use them stop working;
 - every device's admin code, Device Lock PIN and settings backup, and any settings restore still waiting for a replacement, which then keeps its own settings;
+- every device's status history;
 - the integration's copy of the site config encryption key;
 - the deep link destinations.
 
-`async_remove_entry` removes the admin codes', the Device Lock PINs', the settings backups', the registrations', the signing keys' and the site config encryption key's stores. Home Assistant removes the config entry, which holds the link, the push token and the managed device records, and the entry's devices and entities with it. The devices stay signed in to Home Assistant: removing the integration leaves the Home Assistant tokens the Zendo app made, so each device connects again by itself. It also leaves the site config encryption key's helper, which isn't the integration's.
+`async_remove_entry` removes the admin codes', the Device Lock PINs', the settings backups', the status history's, the registrations', the signing keys' and the site config encryption key's stores. Home Assistant removes the config entry, which holds the link, the push token and the managed device records, and the entry's devices and entities with it. The devices stay signed in to Home Assistant: removing the integration leaves the Home Assistant tokens the Zendo app made, so each device connects again by itself. It also leaves the site config encryption key's helper, which isn't the integration's.
 
 **Once an admin has set it up again, by itself:**
 
@@ -1467,3 +1634,11 @@ From 2.1.0 (the time view):
 - **Downgrading below 2.1.0.** Nothing is stored for the view, so nothing is left behind. After the next restart there's no view, and `zendo/v2/info` has no `time_urls`.
 
 For the Device Lock PIN, from UNRELEASED, see [Device Lock PIN Compatibility](#device-lock-pin-compatibility).
+
+From UNRELEASED (online since, the connect cause and the status history):
+
+- **An older app with a UNRELEASED integration.** It never sends `connect_cause`, so its record's `online_since` moves only when the record comes back from offline, and its history records `came_online` only then, with `cause: null`. It ignores `online_since` in list items and events, and never reads the history.
+- **A newer app with an older integration.** The integration drops the unknown `connect_cause`, its list items and `bngnt_managed_device_updated` have no `online_since` key, so the app must read a missing key as `null`, and `zendo/v2/get_managed_device_status_history` answers `unknown_command`, which the app reads as a Home Assistant that keeps no history.
+- **Records persisted by an older integration.** They have no `online_since`. They're restored with none, with no migration step, and a record that was online when Home Assistant stopped gets now when its device is next heard from. Every record's history starts at the first start of UNRELEASED, its `recorded_since`.
+- **Downgrading below UNRELEASED.** The earlier version drops `online_since` the next time it persists the records, and doesn't know the history's store, so it leaves the file alone. After upgrading again, the history of the records that still exist comes back, less what's older than the 3 days, with the same `recorded_since`, so the time on the earlier version reads as no events. A record made on the earlier version starts its history then.
+- **Removing the integration** removes the file, as it does the admin codes'.

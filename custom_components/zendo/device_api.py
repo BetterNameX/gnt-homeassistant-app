@@ -145,6 +145,7 @@ from .settings_backup import (
     report_settings_backup,
     settings_restore,
 )
+from .status_history import connect_cause
 from .time_view import async_time_urls
 
 _LOGGER = logging.getLogger(__name__)
@@ -879,14 +880,18 @@ def ws_subscribe_events(
 @websocket_api.websocket_command(
     _schema(
         f"{WS_PREFIX}register_managed_device",
-        {**_API_KEY, **_optional(*DEVICE_INFO_FIELD_NAMES)},
+        {**_API_KEY, **_optional(*DEVICE_INFO_FIELD_NAMES, "connect_cause")},
     )
 )
 @callback
 def ws_register_managed_device(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Register or update the caller's managed device."""
+    """Register or update the caller's managed device.
+
+    ``connect_cause`` is read loosely: a value that isn't one counts as none,
+    never as an error.
+    """
     found = _registration(hass, connection, msg)
     if found is None:
         return
@@ -900,7 +905,13 @@ def ws_register_managed_device(
         return
 
     connection.send_result(
-        msg["id"], register_managed_device(registry, *_ids(registration), info)
+        msg["id"],
+        register_managed_device(
+            registry,
+            *_ids(registration),
+            info,
+            connect_cause(msg.get("connect_cause")),
+        ),
     )
 
 
@@ -1576,6 +1587,37 @@ async def ws_configure_managed_device_admin_code(
 
 
 @websocket_api.websocket_command(
+    _schema(
+        f"{WS_PREFIX}get_managed_device_status_history",
+        {**_TOKEN, **_optional("managed_device_id")},
+    )
+)
+@websocket_api.async_response
+async def ws_get_managed_device_status_history(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return what happened to a managed device's connection over the past days, by day.
+
+    Reads only the history, so it works while the device is offline.
+    """
+    checked = await _admin_registry(hass, connection, msg)
+    if checked is None:
+        return
+    _, registry, _ = checked
+    try:
+        managed_device_id = _string(msg, "managed_device_id")
+    except _InvalidField as err:
+        _invalid(connection, msg["id"], err)
+        return
+
+    answer = registry.status_history_answer(managed_device_id)
+    if answer is None:
+        _refuse(connection, msg["id"], ERROR_TARGET_NOT_FOUND)
+        return
+    connection.send_result(msg["id"], {"success": True, **answer})
+
+
+@websocket_api.websocket_command(
     _schema(f"{WS_PREFIX}set_deep_link_destinations", {**_TOKEN, **_optional("destinations")})
 )
 @websocket_api.async_response
@@ -1741,6 +1783,7 @@ _COMMANDS = (
     ws_get_managed_device_admin_code,
     ws_get_managed_device_app_lock_pin,
     ws_configure_managed_device_admin_code,
+    ws_get_managed_device_status_history,
     ws_set_deep_link_destinations,
     ws_notify_site_config_manifest_update,
     ws_claim_encryption_key,

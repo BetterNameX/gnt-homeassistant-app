@@ -42,14 +42,21 @@ and on any value change via ``update_managed_device_state``. If 3
 consecutive heartbeats are missed (180s), the device is marked offline
 with ``offline_reason`` ``timeout`` and all its entities become
 unavailable. ``unregister_managed_device`` marks it offline with
-``unregistered``.
+``unregistered``. ``online_since`` is when the record's device connected,
+and None while it's offline.
 
-Persistence: each record's metadata, ``offline_reason``, ``last_seen`` and
-the optional entities it has (not its runtime state) are stored in the
-config entry so entities survive HA restarts. ``last_seen`` is also written
-when HA stops, so it keeps the last heartbeat across a restart. On boot,
-entities are restored as unavailable until the device reconnects and
-re-registers.
+Persistence: each record's metadata, ``offline_reason``, ``last_seen``,
+``online_since`` and the optional entities it has (not its runtime state)
+are stored in the config entry so entities survive HA restarts.
+``last_seen`` is also written when HA stops, so it keeps the last heartbeat
+across a restart. On boot, entities are restored as unavailable until the
+device reconnects and re-registers.
+
+Status history: ``status_history.py`` keeps what happened to each record's
+connection, by managed device ID, and the registry tells it each transition.
+A record that was online when HA stopped is restored offline but awaiting
+its device (docs/managed-devices.md, "After a Restart"). None of the history
+goes in a record, its serialisation or an event.
 
 Optional entities: a property marked ``optional`` is a sensor only some
 devices have, such as a wall panel's presence sensor. A record gets its
@@ -123,6 +130,7 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.start import async_at_started
 
 from .const import CONF_MANAGED_DEVICES, DOMAIN, SERVICE_DEVICE_IDENTIFIER
 from .device_auth import (
@@ -131,12 +139,14 @@ from .device_auth import (
     command_refusal,
     lost_contact,
 )
+from .status_history import OFFLINE_REASON_TIMEOUT
 from .v1_rules import V1_REFUSED_RESULT, is_v1_refused, raise_if_v1_refused
 
 if TYPE_CHECKING:
     from .admin_code import BNGntAdminCodeStore
     from .app_lock_pin import BNGntAppLockPinStore
     from .settings_backup import BNGntSettingsBackupStore
+    from .status_history_store import BNGntStatusHistoryStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -163,7 +173,6 @@ ERROR_COMMAND_FAILED = "command_failed"
 # Why a record is offline. A plain string on the wire, so a hub can add a
 # reason without an app release. The registry only writes these, and the app
 # and the Homey app know the same ones, so keep all three in sync.
-OFFLINE_REASON_TIMEOUT = "timeout"
 OFFLINE_REASONS = (OFFLINE_REASON_TIMEOUT, OFFLINE_REASON_UNREGISTERED)
 
 OfflineReason = Literal["timeout", "unregistered"]
@@ -203,6 +212,7 @@ _ATTACHED_DEVICE_FIELDS = (
     "online",
     "offline_reason",
     "last_seen",
+    "online_since",
 )
 
 
@@ -679,6 +689,8 @@ class BNGntManagedDeviceRecord(TypedDict):
     # Unix seconds, or None for a record restored from before 1.9.0 whose
     # device hasn't been seen since.
     last_seen: float | None
+    # Unix seconds. None while offline.
+    online_since: float | None
     ha_device_id: str | None
     # The property keys of the optional entities created for this record.
     optional_entities: list[str]
@@ -716,6 +728,9 @@ def _serialize_managed_device(
         "online": device["online"],
         "offline_reason": None if device["online"] else device.get("offline_reason"),
         "last_seen": _epoch_ms(device.get("last_seen")),
+        "online_since": (
+            _epoch_ms(device.get("online_since")) if device["online"] else None
+        ),
         "state": device["state"] or None,
         "admin_code_status": admin_code_status,
     }
@@ -723,6 +738,12 @@ def _serialize_managed_device(
 
 def _without_wifi_signal(state: dict) -> dict:
     return {k: v for k, v in state.items() if k != "wifi_signal"}
+
+
+def _restored_timestamp(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
 
 
 def _restored_optional_entities(value: Any) -> list[str]:
@@ -738,8 +759,9 @@ class BNGntManagedDeviceRegistry:
 
     ``_devices`` maps each managed device ID to its record. ``admin_codes``
     keeps the admin code each record's device last reported,
-    ``app_lock_pins`` its Device Lock PIN, and ``settings_backups`` each
-    record's settings backup and restore, by the same ID.
+    ``app_lock_pins`` its Device Lock PIN, ``settings_backups`` each record's
+    settings backup and restore, and ``status_history`` each record's status
+    history, by the same ID.
     """
 
     def __init__(
@@ -749,12 +771,15 @@ class BNGntManagedDeviceRegistry:
         admin_codes: BNGntAdminCodeStore,
         app_lock_pins: BNGntAppLockPinStore,
         settings_backups: BNGntSettingsBackupStore,
+        status_history: BNGntStatusHistoryStore,
     ) -> None:
         self._hass = hass
         self._entry = entry
         self._admin_codes = admin_codes
         self._app_lock_pins = app_lock_pins
         self._settings_backups = settings_backups
+        self._status_history = status_history
+        self._history = status_history.history
         self._devices: dict[str, BNGntManagedDeviceRecord] = {}
         self._pending_commands: dict[str, asyncio.Future] = {}
         # Each pending command's target, and whether it was registered when the
@@ -762,6 +787,7 @@ class BNGntManagedDeviceRegistry:
         self._pending_targets: dict[str, tuple[tuple[str, str], bool]] = {}
         self._offline_check_unsub: callable | None = None
         self._ha_stop_unsub: CALLBACK_TYPE | None = None
+        self._ha_started_unsub: CALLBACK_TYPE | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -770,6 +796,9 @@ class BNGntManagedDeviceRegistry:
         persisted: dict = self._entry.data.get(CONF_MANAGED_DEVICES, {})
         for key, info in persisted.items():
             self._restore_device(key, info)
+
+        self._history.hub_started(time.time())
+        self._ha_started_unsub = async_at_started(self._hass, self._ha_started)
 
         self._offline_check_unsub = async_track_time_interval(
             self._hass, self._check_offline, timedelta(seconds=60)
@@ -788,6 +817,10 @@ class BNGntManagedDeviceRegistry:
             self._ha_stop_unsub()
             self._ha_stop_unsub = None
 
+        if self._ha_started_unsub:
+            self._ha_started_unsub()
+            self._ha_started_unsub = None
+
         # A reload restores each record from the config entry, as a restart
         # does, so last_seen is written here as well as on HA stop.
         self._persist_devices()
@@ -799,6 +832,11 @@ class BNGntManagedDeviceRegistry:
                 future.set_exception(BNGntManagedDeviceUnloadedError())
         self._pending_commands.clear()
         self._pending_targets.clear()
+
+    @callback
+    def _ha_started(self, _hass: HomeAssistant) -> None:
+        self._ha_started_unsub = None
+        self._history.hub_running(time.time())
 
     @callback
     def _persist_on_ha_stop(self, _event: Event) -> None:
@@ -825,6 +863,10 @@ class BNGntManagedDeviceRegistry:
     @property
     def settings_backups(self) -> BNGntSettingsBackupStore:
         return self._settings_backups
+
+    @property
+    def status_history(self) -> BNGntStatusHistoryStore:
+        return self._status_history
 
     @property
     def config_entry_id(self) -> str:
@@ -867,6 +909,14 @@ class BNGntManagedDeviceRegistry:
     def get_device(self, key: str) -> BNGntManagedDeviceRecord | None:
         return self._devices.get(key)
 
+    def status_history_answer(self, key: str) -> dict[str, Any] | None:
+        """Return the record's status history, or None when there's no such record."""
+        if key not in self._devices:
+            return None
+        now = time.time()
+        self._settle_restart_window(now)
+        return self._history.answer(key, now)
+
     def list_devices(self) -> list[tuple[str, BNGntManagedDeviceRecord]]:
         """Return each managed device ID with its record."""
         return list(self._devices.items())
@@ -886,6 +936,7 @@ class BNGntManagedDeviceRegistry:
         device_os_version: str | None,
         app_version: str,
         managed_device_id: str | None = None,
+        connect_cause: str | None = None,
     ) -> str:
         """Register or update the device's managed device. Returns its key.
 
@@ -895,11 +946,31 @@ class BNGntManagedDeviceRegistry:
         first call: creates the HA device + sensor entities. On subsequent
         calls: updates device metadata (name, model, version) and marks it
         back online if it was offline.
+
+        ``connect_cause`` is set only on the first registration of each of
+        the device's connections to the hub. With one, ``online_since`` moves
+        to now even on a record that's online. Without one, it moves only when
+        the record comes back from offline.
         """
         key = self._find_key(profile_id, device_id)
         is_new = key is None
         if key is None:
             key = self._choose_new_key(profile_id, device_id, managed_device_id)
+
+        now = time.time()
+        self._settle_restart_window(now)
+        if is_new:
+            self._history.add_record(key, now)
+            online_since = now
+        else:
+            device = self._devices[key]
+            online_since = self._history.connected(
+                key,
+                was_online=device["online"],
+                online_since=device.get("online_since"),
+                cause=connect_cause,
+                now=now,
+            )
 
         attached = {
             "profile_id": profile_id,
@@ -916,7 +987,8 @@ class BNGntManagedDeviceRegistry:
             "app_version": app_version,
             "online": True,
             "offline_reason": None,
-            "last_seen": time.time(),
+            "last_seen": now,
+            "online_since": online_since,
         }
 
         if is_new:
@@ -958,6 +1030,15 @@ class BNGntManagedDeviceRegistry:
             return False
 
         device = self._devices[key]
+        now = time.time()
+        self._settle_restart_window(now)
+        self._history.disconnected(
+            key,
+            was_online=device["online"],
+            reason=OFFLINE_REASON_UNREGISTERED,
+            at=now,
+            now=now,
+        )
         # A record that already timed out still takes the reason, so the app
         # shows it as no longer monitored rather than as lost.
         changed = (
@@ -966,7 +1047,8 @@ class BNGntManagedDeviceRegistry:
         )
         if device["online"]:
             device["online"] = False
-            device["last_seen"] = time.time()
+            device["online_since"] = None
+            device["last_seen"] = now
             self._set_entities_available(key, False)
         device["offline_reason"] = OFFLINE_REASON_UNREGISTERED
 
@@ -995,8 +1077,17 @@ class BNGntManagedDeviceRegistry:
         device = self._devices[key]
         was_offline = not device["online"]
         old_state = device["state"]
+        now = time.time()
+        self._settle_restart_window(now)
+        device["online_since"] = self._history.connected(
+            key,
+            was_online=not was_offline,
+            online_since=device.get("online_since"),
+            cause=None,
+            now=now,
+        )
         device["state"] = state
-        device["last_seen"] = time.time()
+        device["last_seen"] = now
         device["online"] = True
         device["offline_reason"] = None
 
@@ -1080,6 +1171,7 @@ class BNGntManagedDeviceRegistry:
         self._sync_ha_device(managed_device_id)
         self._admin_codes.keep_on_replace(replacement_key, managed_device_id)
         self._app_lock_pins.remove_on_replace(replacement_key, managed_device_id)
+        self._history.replace(managed_device_id, replacement_key)
         self._settings_backups.on_replace(
             replacement_key,
             managed_device_id,
@@ -1120,6 +1212,7 @@ class BNGntManagedDeviceRegistry:
         self._admin_codes.remove(key)
         self._app_lock_pins.remove(key)
         self._settings_backups.remove(key)
+        self._history.remove_record(key)
         if remove_ha_device:
             self._remove_ha_device(key)
         self._persist_devices()
@@ -1369,13 +1462,23 @@ class BNGntManagedDeviceRegistry:
 
     @callback
     def _check_offline(self, _now) -> None:
-        threshold = time.time() - OFFLINE_TIMEOUT
+        now = time.time()
+        self._settle_restart_window(now)
+        threshold = now - OFFLINE_TIMEOUT
         went_offline: list[str] = []
         for key, device in list(self._devices.items()):
             if device["online"] and device["last_seen"] < threshold:
                 _LOGGER.info("Managed device %s went offline", key)
                 # last_seen stays at the last heartbeat.
+                self._history.disconnected(
+                    key,
+                    was_online=True,
+                    reason=OFFLINE_REASON_TIMEOUT,
+                    at=device["last_seen"],
+                    now=now,
+                )
                 device["online"] = False
+                device["online_since"] = None
                 device["offline_reason"] = OFFLINE_REASON_TIMEOUT
                 self._set_entities_available(key, False)
                 went_offline.append(key)
@@ -1385,8 +1488,20 @@ class BNGntManagedDeviceRegistry:
             for key in went_offline:
                 self._fire_updated(key)
 
+    def _settle_restart_window(self, now: float) -> None:
+        # A record that stops awaiting its device is persisted as offline, so
+        # another restart doesn't restore it awaiting again.
+        if self._history.settle(now):
+            self._persist_devices()
+
     def _restore_device(self, key: str, info: dict) -> None:
         offline_reason = info.get("offline_reason")
+        if offline_reason not in OFFLINE_REASONS:
+            self._history.await_reconnect(
+                key,
+                _restored_timestamp(info.get("online_since")),
+                _restored_timestamp(info.get("last_seen")),
+            )
         self._devices[key] = {
             **info,
             "device_model_slug": info.get("device_model_slug"),
@@ -1403,6 +1518,7 @@ class BNGntManagedDeviceRegistry:
                 else OFFLINE_REASON_TIMEOUT
             ),
             "last_seen": info.get("last_seen"),
+            "online_since": None,
             "state": {},
             "ha_device_id": None,
             "optional_entities": _restored_optional_entities(
@@ -1525,6 +1641,14 @@ class BNGntManagedDeviceRegistry:
 
         persisted: dict[str, dict] = {}
         for key, device in self._devices.items():
+            # Persisted as online, so that a record still awaiting its device
+            # at another restart is restored awaiting it again.
+            if self._history.is_awaiting(key):
+                offline_reason = None
+                online_since = self._history.awaited_online_since(key)
+            else:
+                offline_reason = device.get("offline_reason")
+                online_since = device.get("online_since")
             persisted[key] = {
                 "profile_id": device["profile_id"],
                 "device_id": device["device_id"],
@@ -1538,8 +1662,9 @@ class BNGntManagedDeviceRegistry:
                 "device_os": device.get("device_os", ""),
                 "device_os_version": device.get("device_os_version"),
                 "app_version": device.get("app_version"),
-                "offline_reason": device.get("offline_reason"),
+                "offline_reason": offline_reason,
                 "last_seen": device.get("last_seen"),
+                "online_since": online_since,
                 "optional_entities": list(device.get("optional_entities", [])),
             }
 
@@ -1759,8 +1884,12 @@ def register_managed_device(
     profile_id: str,
     device_id: str,
     info: dict[str, Any],
+    connect_cause: str | None = None,
 ) -> dict:
-    """Register the device's managed device from validated device info."""
+    """Register the device's managed device from validated device info.
+
+    ``connect_cause`` comes only with zendo/v2/register_managed_device.
+    """
     managed_device_id = registry.register_device(
         profile_id=profile_id,
         device_id=device_id,
@@ -1775,6 +1904,7 @@ def register_managed_device(
         device_os_version=info.get("device_os_version"),
         app_version=info["app_version"],
         managed_device_id=info.get("managed_device_id"),
+        connect_cause=connect_cause,
     )
     return {
         "success": True,
