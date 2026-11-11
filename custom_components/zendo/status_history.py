@@ -6,8 +6,8 @@ own. ``status_history_store.py`` keeps it in a store, and the registry in
 ``managed_devices.py`` tells it each record's transitions. See
 docs/managed-devices.md, "Status History".
 
-Times passed in are Unix seconds, as the registry keeps them. Entries hold epoch
-ms, as the answer gives them.
+Times passed in are Unix seconds, as the registry keeps them. What's stored holds
+epoch ms, as the answer gives them.
 """
 
 from __future__ import annotations
@@ -31,6 +31,10 @@ CAUSE_RECONNECTED = "reconnected"
 HISTORY_DAYS = 3
 MAX_ENTRIES_PER_DAY = 50
 MERGE_WINDOW_MS = 10 * 60 * 1000
+CAUSE_FILL_WINDOW_MS = 180 * 1000
+
+# The store's, in seconds: see docs/managed-devices.md, "History Storage".
+SAVE_DELAY = 60
 
 _CONNECT_CAUSE = re.compile(r"[a-z][a-z_]{0,31}")
 
@@ -61,11 +65,14 @@ class StatusEntry(TypedDict):
 
 class _RecordHistory(TypedDict):
     recorded_since: int
+    # The record's last heartbeat or registration, or None while the history
+    # hasn't had one.
+    last_seen: int | None
     entries: list[StatusEntry]
 
 
 def _ms(timestamp: float) -> int:
-    return int(timestamp * 1000)
+    return round(timestamp * 1000)
 
 
 def _age(entry: StatusEntry) -> tuple[int, int]:
@@ -79,21 +86,23 @@ def _is_epoch_ms(value: Any) -> bool:
 class BNGntStatusHistory:
     """Each record's status history, the hub's starts, and the restart window.
 
-    Kept in memory. ``on_change`` is called after every change to what's
-    stored, for the store to save it. Until the restart window closes, a
-    record restored *awaiting* its device counts as still online: see
-    docs/managed-devices.md, "After a Restart".
+    Kept in memory. ``on_unsaved`` is called by the first change since the
+    store last took ``data_to_save``, and not again until it takes it once
+    more, so the store writes once for all the changes in between. Until the
+    restart window closes, a record restored *awaiting* its device counts as
+    still online: see docs/managed-devices.md, "After a Restart".
     """
 
     def __init__(
         self,
         time_zone: Callable[[], tzinfo],
         restart_window: float,
-        on_change: Callable[[], None] = lambda: None,
+        on_unsaved: Callable[[], None] = lambda: None,
     ) -> None:
         self._time_zone = time_zone
         self._restart_window = restart_window
-        self._on_change = on_change
+        self._on_unsaved = on_unsaved
+        self._unsaved = False
         self._records: dict[str, _RecordHistory] = {}
         self._hub_starts: list[StatusEntry] = []
         # Each awaiting record's online_since and last_seen from before the stop.
@@ -125,7 +134,7 @@ class BNGntStatusHistory:
         )
         self._prune(now)
         if self.as_data() != data:
-            self._on_change()
+            self._changed()
 
     def as_data(self) -> dict[str, Any]:
         """Return what the store saves."""
@@ -134,11 +143,21 @@ class BNGntStatusHistory:
             "records": {
                 key: {
                     "recorded_since": record["recorded_since"],
+                    "last_seen": record["last_seen"],
                     "entries": [dict(entry) for entry in record["entries"]],
                 }
                 for key, record in self._records.items()
             },
         }
+
+    @property
+    def has_unsaved_changes(self) -> bool:
+        return self._unsaved
+
+    def data_to_save(self) -> dict[str, Any]:
+        """Return what the store saves, as it writes it."""
+        self._unsaved = False
+        return self.as_data()
 
     # -- the hub ---------------------------------------------------------------
 
@@ -146,7 +165,7 @@ class BNGntStatusHistory:
         """Record the hub's start. The restart window stays open until ``hub_running``."""
         self._started_at = now
         self._window_from = None
-        self._add(self._hub_starts, KIND_HUB_STARTED, None, None, now, now)
+        self._add(self._hub_starts, KIND_HUB_STARTED, None, None, _ms(now), now)
 
     def hub_running(self, now: float) -> None:
         """Home Assistant has started, so devices can reconnect: the window closes in ``restart_window``."""
@@ -156,8 +175,28 @@ class BNGntStatusHistory:
     def await_reconnect(
         self, key: str, online_since: float | None, last_seen: float | None
     ) -> None:
-        """Hold a record restored offline whose device was online when the hub stopped."""
-        self._awaiting[key] = (online_since, last_seen)
+        """Hold a record restored offline whose device was online when the hub stopped.
+
+        ``online_since`` and ``last_seen`` are the ones the record was
+        persisted with. Its last heartbeat is the later of that ``last_seen``
+        and the one the history saved: see ``restored_last_seen``.
+        """
+        self._awaiting[key] = (online_since, self.restored_last_seen(key, last_seen))
+
+    def restored_last_seen(self, key: str, last_seen: float | None) -> float | None:
+        """Return the later of a restored record's ``last_seen`` and the one the history saved.
+
+        The config entry gets a heartbeat only at a transition or when the
+        hub stops cleanly, and the history's store within a minute or so, so
+        after a crash the history's is the later.
+        """
+        record = self._records.get(key)
+        saved = record["last_seen"] if record is not None else None
+        if saved is None:
+            return last_seen
+        if last_seen is None or _ms(last_seen) < saved:
+            return saved / 1000
+        return last_seen
 
     def is_awaiting(self, key: str) -> bool:
         return key in self._awaiting
@@ -170,10 +209,10 @@ class BNGntStatusHistory:
     def settle(self, now: float) -> bool:
         """Once the restart window has closed, record each record still awaiting its device as gone offline.
 
-        At its last heartbeat, or at the hub's start for a record that has
-        none. Returns whether it recorded any. The registry calls this on its
-        offline check as well as on each transition, so the entry doesn't wait
-        for one.
+        At its last heartbeat, as ``await_reconnect`` took it, or at the hub's
+        start for a record that has none. Returns whether it recorded any. The
+        registry calls this on its offline check as well as on each
+        transition, so the entry doesn't wait for one.
         """
         if not self._awaiting or self._window_open(now):
             return False
@@ -193,24 +232,33 @@ class BNGntStatusHistory:
     def add_record(self, key: str, now: float) -> None:
         """Start a new record's history, recorded from now."""
         self._awaiting.pop(key, None)
-        self._records[key] = {"recorded_since": _ms(now), "entries": []}
-        self._on_change()
+        self._records[key] = {
+            "recorded_since": _ms(now),
+            "last_seen": _ms(now),
+            "entries": [],
+        }
+        self._changed()
 
     def remove_record(self, key: str) -> None:
         self._awaiting.pop(key, None)
         if self._records.pop(key, None) is not None:
-            self._on_change()
+            self._changed()
 
     def replace(self, target: str, replacement: str) -> None:
         """The replacement takes the target over, and the record it leaves behind goes.
 
-        The target keeps its own history. If the replacement's record was
-        awaiting its device, the target is now, as that device is attached to it.
+        The target keeps its own history, and takes the replacement's last
+        heartbeat, and its awaiting if the replacement's record was awaiting
+        its device, as that device is attached to it now.
         """
         awaiting = self._awaiting.pop(replacement, None)
         self._awaiting.pop(target, None)
         if awaiting is not None:
             self._awaiting[target] = awaiting
+        target_record = self._records.get(target)
+        replacement_record = self._records.get(replacement)
+        if target_record is not None and replacement_record is not None:
+            target_record["last_seen"] = replacement_record["last_seen"]
         self.remove_record(replacement)
 
     def connected(
@@ -224,11 +272,14 @@ class BNGntStatusHistory:
     ) -> float:
         """Record a registration, or a state update, which has no cause, for an existing record.
 
-        Returns the record's ``online_since`` after it: now when it comes back
-        from offline or the registration has a cause, else the one it has. A
+        Each is a heartbeat: the record's ``last_seen`` moves to now. Returns
+        the record's ``online_since`` after it: now when it comes back from
+        offline or the registration has a cause, else the one it has. A
         record awaiting its device gets back the one it had before the stop.
         """
         self.settle(now)
+        self._history_of(key, now)["last_seen"] = _ms(now)
+        self._changed()
         awaiting = self._awaiting.pop(key, None)
         if awaiting is not None:
             kept_online_since, _ = awaiting
@@ -237,12 +288,12 @@ class BNGntStatusHistory:
             # The hub's own restart dropped the connection: its hub_started
             # entry already says so.
             if cause != CAUSE_RECONNECTED:
-                self._record(key, KIND_CAME_ONLINE, None, cause, now, now)
+                self._came_online(key, cause, now)
             return now
 
         if was_online and cause is None:
             return online_since if online_since is not None else now
-        self._record(key, KIND_CAME_ONLINE, None, cause, now, now)
+        self._came_online(key, cause, now)
         return now
 
     def disconnected(
@@ -260,21 +311,26 @@ class BNGntStatusHistory:
         """Return the record's history as ``zendo/v2/get_managed_device_status_history`` answers it.
 
         Exactly ``HISTORY_DAYS`` days, today first, each with its entries
-        newest first, the hub's starts among them.
+        newest first, the hub's starts from its ``recorded_since`` on among
+        them.
         """
         self.settle(now)
         if self._prune(now):
-            self._on_change()
+            self._changed()
 
         record = self._records.get(key)
+        recorded_since = record["recorded_since"] if record is not None else _ms(now)
         record_entries = record["entries"] if record is not None else []
+        hub_starts = [
+            entry for entry in self._hub_starts if entry["first_at"] >= recorded_since
+        ]
         today = self._day(_ms(now))
         days: list[dict[str, Any]] = []
         for offset in range(HISTORY_DAYS):
             day = today - timedelta(days=offset)
             entries = [
                 entry
-                for entry in (*record_entries, *self._hub_starts)
+                for entry in (*record_entries, *hub_starts)
                 if self._day(entry["first_at"]) == day
             ]
             # The sort is stable, so of two entries at the same time the one
@@ -287,12 +343,7 @@ class BNGntStatusHistory:
                     "entries": [dict(entry) for entry in entries[:MAX_ENTRIES_PER_DAY]],
                 }
             )
-        return {
-            "recorded_since": (
-                record["recorded_since"] if record is not None else _ms(now)
-            ),
-            "days": days,
-        }
+        return {"recorded_since": recorded_since, "days": days}
 
     # -- internal --------------------------------------------------------------
 
@@ -301,6 +352,43 @@ class BNGntStatusHistory:
 
     def _day(self, epoch_ms: int) -> date:
         return datetime.fromtimestamp(epoch_ms / 1000, self._time_zone()).date()
+
+    def _changed(self) -> None:
+        if not self._unsaved:
+            self._unsaved = True
+            self._on_unsaved()
+
+    def _history_of(self, key: str, since: float) -> _RecordHistory:
+        """Return the record's history, starting one at ``since`` if it has none."""
+        record = self._records.get(key)
+        if record is None:
+            record = self._records[key] = {
+                "recorded_since": _ms(since),
+                "last_seen": None,
+                "entries": [],
+            }
+        return record
+
+    def _came_online(self, key: str, cause: str | None, now: float) -> None:
+        """Record a came_online, or give its cause to one just recorded without a cause.
+
+        A state update can bring a record back before the registration that
+        carries the connection's cause: see docs/managed-devices.md, "What's
+        Recorded".
+        """
+        entries = self._history_of(key, now)["entries"]
+        if cause is not None and entries:
+            newest = max(reversed(entries), key=_age)
+            if (
+                newest["kind"] == KIND_CAME_ONLINE
+                and newest["cause"] is None
+                and newest["count"] == 1
+                and abs(_ms(now) - newest["last_at"]) <= CAUSE_FILL_WINDOW_MS
+            ):
+                newest["cause"] = cause
+                self._changed()
+                return
+        self._record(key, KIND_CAME_ONLINE, None, cause, now, now)
 
     def _record(
         self,
@@ -311,13 +399,12 @@ class BNGntStatusHistory:
         at: float,
         now: float,
     ) -> None:
-        record = self._records.get(key)
-        if record is None:
-            record = self._records[key] = {"recorded_since": _ms(at), "entries": []}
-        # A timeout is recorded at the last heartbeat, which can come before
-        # the history started.
-        record["recorded_since"] = min(record["recorded_since"], _ms(at))
-        self._add(record["entries"], kind, reason, cause, at, now)
+        record = self._history_of(key, at)
+        # recorded_since never moves. An event from before it, such as a
+        # timeout at a last heartbeat from before the history began, is
+        # recorded at it.
+        at_ms = max(_ms(at), record["recorded_since"])
+        self._add(record["entries"], kind, reason, cause, at_ms, now)
 
     def _add(
         self,
@@ -325,11 +412,10 @@ class BNGntStatusHistory:
         kind: str,
         reason: str | None,
         cause: str | None,
-        at: float,
+        at_ms: int,
         now: float,
     ) -> None:
         """Merge the event into the latest like entry on its day, or add one."""
-        at_ms = _ms(at)
         day = self._day(at_ms)
         latest: StatusEntry | None = None
         for entry in entries:
@@ -359,7 +445,7 @@ class BNGntStatusHistory:
             )
             self._cap_day(entries, day)
         self._prune(now)
-        self._on_change()
+        self._changed()
 
     def _cap_day(self, entries: list[StatusEntry], day: date) -> None:
         on_day = [entry for entry in entries if self._day(entry["first_at"]) == day]
@@ -383,9 +469,11 @@ class BNGntStatusHistory:
 
     def _restored_record(self, value: Any, now: float) -> _RecordHistory:
         if not isinstance(value, dict) or not self._is_day_time(value.get("recorded_since")):
-            return {"recorded_since": _ms(now), "entries": []}
+            return {"recorded_since": _ms(now), "last_seen": None, "entries": []}
+        last_seen = value.get("last_seen")
         return {
             "recorded_since": value["recorded_since"],
+            "last_seen": last_seen if self._is_day_time(last_seen) else None,
             "entries": self._restored_entries(
                 value.get("entries"), (KIND_WENT_OFFLINE, KIND_CAME_ONLINE)
             ),

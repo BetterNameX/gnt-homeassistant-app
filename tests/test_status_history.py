@@ -28,6 +28,7 @@ _spec.loader.exec_module(status_history)
 TZ = ZoneInfo("Europe/Rome")
 RESTART_WINDOW = 180
 MINUTE = 60
+SAVE_DELAY = status_history.SAVE_DELAY
 KEY = "md_front_desk"
 OTHER = "md_meeting_room"
 
@@ -38,7 +39,7 @@ def at(month, day, hour, minute=0, second=0, year=2026):
 
 
 def ms(timestamp):
-    return int(timestamp * 1000)
+    return round(timestamp * 1000)
 
 
 class Changes:
@@ -50,11 +51,34 @@ class Changes:
 
 
 def make(*keys, now=None, data=None, time_zone=TZ):
+    """A history loaded at ``now``, by default before every event a test records,
+    with nothing left to save."""
     changes = Changes()
     history = status_history.BNGntStatusHistory(lambda: time_zone, RESTART_WINDOW, changes)
-    history.load(data, keys or (KEY,), now if now is not None else at(11, 10, 9))
-    changes.count = 0
+    history.load(data, keys or (KEY,), now if now is not None else at(11, 8, 0))
+    saved(history, changes)
     return history, changes
+
+
+def saved(history, changes):
+    """Take what the store would write, as it writes it."""
+    history.data_to_save()
+    changes.count = 0
+
+
+def stored(recorded_since, *keys, last_seen=None):
+    """What the store holds for records with no entries."""
+    return {
+        "hub_started": [],
+        "records": {
+            key: {
+                "recorded_since": ms(recorded_since),
+                "last_seen": ms(last_seen) if last_seen is not None else None,
+                "entries": [],
+            }
+            for key in keys
+        },
+    }
 
 
 def day_entries(answer, index):
@@ -166,9 +190,9 @@ class MergingTest(unittest.TestCase):
         offline(history, at(11, 10, 9), reason="timeout")
         offline(history, at(11, 10, 9, 1), reason="unregistered")
         online(history, at(11, 10, 9, 2))
-        online(history, at(11, 10, 9, 3), cause="reconnected")
-        online(history, at(11, 10, 9, 4), cause="device_restarted")
-        online(history, at(11, 10, 9, 5), cause="reconnected")
+        online(history, at(11, 10, 9, 6), cause="reconnected")
+        online(history, at(11, 10, 9, 7), cause="device_restarted")
+        online(history, at(11, 10, 9, 8), cause="reconnected")
         entries = day_entries(history.answer(KEY, at(11, 10, 12)), 0)
         self.assertEqual(
             [(entry["kind"], entry["reason"], entry["cause"], entry["count"]) for entry in entries],
@@ -240,12 +264,18 @@ class MergingTest(unittest.TestCase):
             [("hub_started", 1), ("hub_started", 2), ("went_offline", 1)],
         )
 
-    def test_every_change_is_reported_for_saving(self):
+    def test_the_first_change_asks_for_a_save_and_the_rest_wait_for_it(self):
         history, changes = make()
+        self.assertFalse(history.has_unsaved_changes)
         offline(history, at(11, 10, 9))
         offline(history, at(11, 10, 9, 1))
         history.hub_started(at(11, 10, 9, 2))
-        self.assertEqual(changes.count, 3)
+        self.assertEqual(changes.count, 1)
+        self.assertTrue(history.has_unsaved_changes)
+        history.data_to_save()
+        self.assertFalse(history.has_unsaved_changes)
+        offline(history, at(11, 10, 9, 3))
+        self.assertEqual(changes.count, 2)
 
 
 class DaysTest(unittest.TestCase):
@@ -340,7 +370,7 @@ class DaysTest(unittest.TestCase):
         self.assertEqual(day_entries(history.answer(KEY, at(11, 10, 12)), 0)[0]["count"], 1)
 
     def test_the_answer_across_a_daylight_saving_change(self):
-        history, _ = make(now=at(10, 26, 9))
+        history, _ = make(now=at(10, 25, 0))
         offline(history, at(10, 25, 2, 30))
         answer = history.answer(KEY, at(10, 26, 9))
         self.assertEqual(
@@ -367,7 +397,7 @@ class PruningTest(unittest.TestCase):
         history, changes = make(now=at(11, 8, 9))
         offline(history, at(11, 8, 9))
         history.hub_started(at(11, 8, 10))
-        changes.count = 0
+        saved(history, changes)
         answer = history.answer(KEY, at(11, 11, 0, 1))
         self.assertEqual([day["entries"] for day in answer["days"]], [[], [], []])
         self.assertEqual(history.as_data()["records"][KEY]["entries"], [])
@@ -377,9 +407,10 @@ class PruningTest(unittest.TestCase):
     def test_a_read_with_nothing_to_drop_doesnt_save(self):
         history, changes = make()
         offline(history, at(11, 10, 9))
-        changes.count = 0
+        saved(history, changes)
         history.answer(KEY, at(11, 10, 12))
         self.assertEqual(changes.count, 0)
+        self.assertFalse(history.has_unsaved_changes)
 
     def test_two_days_ago_is_kept_until_midnight(self):
         history, _ = make(now=at(11, 8, 0))
@@ -455,12 +486,11 @@ class BackstopTest(unittest.TestCase):
 
 class OnlineSinceTest(unittest.TestCase):
     def test_a_registration_without_a_cause_on_an_online_record_leaves_it_alone(self):
-        history, changes = make()
+        history, _ = make()
         since = at(11, 10, 8)
         result = online(history, at(11, 10, 9), was_online=True, online_since=since)
         self.assertEqual(result, since)
         self.assertEqual(day_entries(history.answer(KEY, at(11, 10, 9)), 0), [])
-        self.assertEqual(changes.count, 0)
 
     def test_a_state_update_on_an_online_record_leaves_it_alone(self):
         history, _ = make()
@@ -513,14 +543,23 @@ class OnlineSinceTest(unittest.TestCase):
         self.assertEqual([(entry["kind"], entry["reason"]) for entry in entries], [("went_offline", "timeout")])
 
 
+# When the history held by ``restarted`` began, unless a test gives its own.
+HISTORY_BEGAN = at(11, 10, 6)
+
+
 def restarted(online_since, last_seen, stop_and_start, *, running=True, data=None):
-    """The history after a hub restart, with KEY online when it stopped."""
+    """The history after a hub restart, with KEY online when it stopped.
+
+    ``last_seen`` is the one the config entry has.
+    """
+    if data is None:
+        data = stored(HISTORY_BEGAN, KEY, OTHER)
     history, changes = make(KEY, OTHER, data=data, now=stop_and_start)
     history.await_reconnect(KEY, online_since, last_seen)
     history.hub_started(stop_and_start)
     if running:
         history.hub_running(stop_and_start)
-    changes.count = 0
+    saved(history, changes)
     return history, changes
 
 
@@ -643,16 +682,16 @@ class RestartTest(unittest.TestCase):
         )
 
     def test_a_record_offline_before_the_restart_records_its_return_in_the_window(self):
-        history, _ = restarted(self.online_since, self.last_seen, self.start)
         for cause in (None, "reconnected"):
             with self.subTest(cause=cause):
+                history, _ = restarted(self.online_since, self.last_seen, self.start)
                 when = self.start + 30
                 self.assertEqual(online(history, when, key=OTHER, cause=cause), when)
-        entries = day_entries(history.answer(OTHER, self.start + 40), 0)
-        self.assertEqual(
-            [(entry["kind"], entry["cause"]) for entry in entries],
-            [("came_online", "reconnected"), ("came_online", None), ("hub_started", None)],
-        )
+                entries = day_entries(history.answer(OTHER, self.start + 40), 0)
+                self.assertEqual(
+                    [(entry["kind"], entry["cause"]) for entry in entries],
+                    [("came_online", cause), ("hub_started", None)],
+                )
 
     def test_reconnected_for_a_record_online_before_the_restart_is_suppressed(self):
         history, _ = restarted(self.online_since, self.last_seen, self.start)
@@ -689,12 +728,17 @@ class RestartTest(unittest.TestCase):
             ["hub_started", "came_online"],
         )
 
-    def test_an_old_last_heartbeat_moves_recorded_since_back(self):
-        history, _ = restarted(self.online_since, self.last_seen, self.start)
-        self.assertEqual(history.answer(KEY, self.start)["recorded_since"], ms(self.start))
-        history.settle(self.start + RESTART_WINDOW)
+    def test_a_last_heartbeat_from_before_the_history_began_never_moves_recorded_since(self):
+        # The first start with the history: it begins at the restart.
+        history, _ = restarted(
+            self.online_since, self.last_seen, self.start, data=stored(self.start, KEY, OTHER)
+        )
+        closed = self.start + RESTART_WINDOW
+        history.settle(closed)
+        self.assertEqual(history.answer(KEY, closed)["recorded_since"], ms(self.start))
         self.assertEqual(
-            history.answer(KEY, self.start + RESTART_WINDOW)["recorded_since"], ms(self.last_seen)
+            [(entry["kind"], entry["first_at"]) for entry in self.record_entries(history, closed)],
+            [("went_offline", ms(self.start))],
         )
 
     def test_without_a_last_heartbeat_it_went_offline_at_the_hubs_start(self):
@@ -709,6 +753,104 @@ class RestartTest(unittest.TestCase):
         self.assertIsNone(history.awaited_online_since(OTHER))
         online(history, self.start + 10)
         self.assertFalse(history.is_awaiting(KEY))
+
+
+class CrashTest(unittest.TestCase):
+    """The hub stopped without writing the config entry, which holds the
+    last_seen of the record's last transition, days before the history's."""
+
+    def setUp(self):
+        self.began = at(11, 8, 9)
+        self.config_entry_last_seen = at(11, 8, 14)
+        self.saved_last_seen = at(11, 10, 8, 58)
+        self.start = at(11, 10, 9)
+
+    def test_it_went_offline_at_the_last_heartbeat_the_history_saved(self):
+        data = stored(self.began, KEY, OTHER, last_seen=self.saved_last_seen)
+        history, _ = restarted(at(11, 8, 13), self.config_entry_last_seen, self.start, data=data)
+        closed = self.start + RESTART_WINDOW
+        self.assertTrue(history.settle(closed))
+        answer = history.answer(KEY, closed)
+        self.assertEqual(answer["recorded_since"], ms(self.began))
+        self.assertEqual(
+            [
+                [(entry["kind"], entry["first_at"]) for entry in day["entries"]]
+                for day in answer["days"]
+            ],
+            [
+                [("hub_started", ms(self.start)), ("went_offline", ms(self.saved_last_seen))],
+                [],
+                [],
+            ],
+        )
+
+    def test_a_restored_record_takes_the_later_last_seen(self):
+        history, _ = make(KEY, OTHER, data=stored(self.began, KEY, last_seen=self.saved_last_seen))
+        self.assertEqual(
+            history.restored_last_seen(KEY, self.config_entry_last_seen), self.saved_last_seen
+        )
+        self.assertEqual(history.restored_last_seen(KEY, None), self.saved_last_seen)
+        later = self.saved_last_seen + 30
+        self.assertEqual(history.restored_last_seen(KEY, later), later)
+        self.assertEqual(
+            history.restored_last_seen(OTHER, self.config_entry_last_seen),
+            self.config_entry_last_seen,
+        )
+        self.assertIsNone(history.restored_last_seen(OTHER, None))
+
+    def test_without_a_saved_heartbeat_a_stale_one_never_moves_recorded_since(self):
+        began = at(11, 10, 6)
+        history, _ = restarted(
+            None, self.config_entry_last_seen, self.start, data=stored(began, KEY, OTHER)
+        )
+        closed = self.start + RESTART_WINDOW
+        history.settle(closed)
+        answer = history.answer(KEY, closed)
+        self.assertEqual(answer["recorded_since"], ms(began))
+        self.assertEqual(
+            [entry["first_at"] for entry in day_entries(answer, 0) if entry["kind"] == "went_offline"],
+            [ms(began)],
+        )
+        self.assertEqual([day_entries(answer, 1), day_entries(answer, 2)], [[], []])
+
+
+class LastSeenTest(unittest.TestCase):
+    def test_a_heartbeat_moves_it_and_asks_for_a_save(self):
+        history, changes = make()
+        now = at(11, 10, 9)
+        online(history, now, was_online=True, online_since=at(11, 10, 8))
+        self.assertEqual(history.as_data()["records"][KEY]["last_seen"], ms(now))
+        self.assertEqual(history.as_data()["records"][KEY]["entries"], [])
+        self.assertEqual(changes.count, 1)
+
+    def test_a_registration_or_a_return_moves_it(self):
+        history, _ = make()
+        online(history, at(11, 10, 9), cause="device_restarted")
+        self.assertEqual(history.as_data()["records"][KEY]["last_seen"], ms(at(11, 10, 9)))
+
+    def test_going_offline_leaves_it(self):
+        history, _ = make()
+        online(history, at(11, 10, 9), was_online=True)
+        offline(history, at(11, 10, 9, 5), reason="unregistered")
+        self.assertEqual(history.as_data()["records"][KEY]["last_seen"], ms(at(11, 10, 9)))
+
+    def test_a_new_record_is_seen_at_its_creation(self):
+        history, _ = make()
+        history.add_record(OTHER, at(11, 10, 9, 30))
+        self.assertEqual(history.as_data()["records"][OTHER]["last_seen"], ms(at(11, 10, 9, 30)))
+
+    def test_it_survives_a_reload(self):
+        history, _ = make()
+        online(history, at(11, 10, 9), was_online=True)
+        reloaded, _ = make(data=history.as_data(), now=at(11, 10, 10))
+        self.assertEqual(reloaded.restored_last_seen(KEY, at(11, 10, 8)), at(11, 10, 9))
+
+    def test_a_replace_gives_the_target_the_replacements(self):
+        history, _ = make(KEY, OTHER)
+        online(history, at(11, 10, 9), key=KEY, was_online=True)
+        online(history, at(11, 10, 8), key=OTHER, was_online=True)
+        history.replace(KEY, OTHER)
+        self.assertEqual(history.as_data()["records"][KEY]["last_seen"], ms(at(11, 10, 8)))
 
 
 class RecordsTest(unittest.TestCase):
@@ -729,13 +871,14 @@ class RecordsTest(unittest.TestCase):
     def test_removing_a_record_removes_its_history(self):
         history, changes = make(KEY, OTHER)
         offline(history, at(11, 10, 9))
-        changes.count = 0
+        saved(history, changes)
         history.remove_record(KEY)
         self.assertNotIn(KEY, history.as_data()["records"])
         self.assertIn(OTHER, history.as_data()["records"])
         self.assertEqual(changes.count, 1)
+        saved(history, changes)
         history.remove_record(KEY)
-        self.assertEqual(changes.count, 1)
+        self.assertEqual(changes.count, 0)
 
     def test_a_replace_keeps_the_targets_history_and_drops_the_replacements(self):
         history, _ = make(KEY, OTHER, now=at(11, 9, 9))
@@ -771,7 +914,41 @@ class RecordsTest(unittest.TestCase):
         history.hub_started(at(11, 10, 9))
         answer = history.answer("md_unknown", at(11, 10, 10))
         self.assertEqual(answer["recorded_since"], ms(at(11, 10, 10)))
-        self.assertEqual(kinds(day_entries(answer, 0)), ["hub_started"])
+        self.assertEqual([day["entries"] for day in answer["days"]], [[], [], []])
+
+
+class HubStartsBeforeTheHistoryTest(unittest.TestCase):
+    def test_a_records_answer_leaves_out_the_hub_starts_from_before_its_history(self):
+        history, _ = make(KEY)
+        history.hub_started(at(11, 10, 9))
+        history.add_record(OTHER, at(11, 10, 9, 30))
+        history.hub_started(at(11, 10, 10))
+        online(history, at(11, 10, 10, 1), key=OTHER, cause="device_restarted")
+        self.assertEqual(
+            [
+                (entry["kind"], entry["first_at"])
+                for entry in day_entries(history.answer(OTHER, at(11, 10, 12)), 0)
+            ],
+            [("came_online", ms(at(11, 10, 10, 1))), ("hub_started", ms(at(11, 10, 10)))],
+        )
+        self.assertEqual(
+            [entry["first_at"] for entry in day_entries(history.answer(KEY, at(11, 10, 12)), 0)],
+            [ms(at(11, 10, 10)), ms(at(11, 10, 9))],
+        )
+
+    def test_one_that_began_before_it_is_left_out_whole(self):
+        history, _ = make(KEY)
+        history.hub_started(at(11, 10, 9))
+        history.add_record(OTHER, at(11, 10, 9, 2))
+        history.hub_started(at(11, 10, 9, 5))
+        self.assertEqual(day_entries(history.answer(OTHER, at(11, 10, 12)), 0), [])
+        (entry,) = day_entries(history.answer(KEY, at(11, 10, 12)), 0)
+        self.assertEqual(entry["count"], 2)
+
+    def test_one_at_the_moment_the_history_began_is_in_it(self):
+        history, _ = make(KEY, now=at(11, 10, 9))
+        history.hub_started(at(11, 10, 9))
+        self.assertEqual(kinds(day_entries(history.answer(KEY, at(11, 10, 12)), 0)), ["hub_started"])
 
 
 class LoadTest(unittest.TestCase):
@@ -784,8 +961,8 @@ class LoadTest(unittest.TestCase):
             {
                 "hub_started": [],
                 "records": {
-                    KEY: {"recorded_since": ms(at(11, 10, 9)), "entries": []},
-                    OTHER: {"recorded_since": ms(at(11, 10, 9)), "entries": []},
+                    KEY: {"recorded_since": ms(at(11, 10, 9)), "last_seen": None, "entries": []},
+                    OTHER: {"recorded_since": ms(at(11, 10, 9)), "last_seen": None, "entries": []},
                 },
             },
         )
@@ -801,6 +978,17 @@ class LoadTest(unittest.TestCase):
         reloaded.load(history.as_data(), [KEY, OTHER], at(11, 10, 9))
         self.assertEqual(reloaded.as_data(), history.as_data())
         self.assertEqual(changes.count, 0)
+
+    def test_a_record_saved_without_a_last_seen_loads_without_one(self):
+        data = {"hub_started": [], "records": {KEY: {"recorded_since": ms(at(11, 9, 9)), "entries": []}}}
+        changes = Changes()
+        history = status_history.BNGntStatusHistory(lambda: TZ, RESTART_WINDOW, changes)
+        history.load(data, [KEY], at(11, 10, 9))
+        self.assertEqual(
+            history.as_data()["records"][KEY],
+            {"recorded_since": ms(at(11, 9, 9)), "last_seen": None, "entries": []},
+        )
+        self.assertEqual(changes.count, 1)
 
     def test_a_record_thats_gone_is_dropped_and_a_new_one_starts_now(self):
         history, _ = make(KEY, OTHER, now=at(11, 9, 9))
@@ -837,8 +1025,12 @@ class LoadTest(unittest.TestCase):
         data = {
             "hub_started": [good, {**good, "kind": "hub_started", "reason": "timeout"}],
             "records": {
-                KEY: {"recorded_since": ms(at(11, 9, 9)), "entries": [good, *bad_entries]},
-                OTHER: {"recorded_since": "long ago", "entries": [good]},
+                KEY: {
+                    "recorded_since": ms(at(11, 9, 9)),
+                    "last_seen": "a minute ago",
+                    "entries": [good, *bad_entries],
+                },
+                OTHER: {"recorded_since": "long ago", "last_seen": ms(at(11, 10, 8)), "entries": [good]},
             },
         }
         changes = Changes()
@@ -846,8 +1038,10 @@ class LoadTest(unittest.TestCase):
         history.load(data, [KEY, OTHER], at(11, 10, 9))
         stored = history.as_data()
         self.assertEqual(stored["records"][KEY]["entries"], [good])
+        self.assertIsNone(stored["records"][KEY]["last_seen"])
         self.assertEqual(
-            stored["records"][OTHER], {"recorded_since": ms(at(11, 10, 9)), "entries": []}
+            stored["records"][OTHER],
+            {"recorded_since": ms(at(11, 10, 9)), "last_seen": None, "entries": []},
         )
         self.assertEqual(
             stored["hub_started"], [{**good, "kind": "hub_started", "reason": None}]
@@ -862,9 +1056,168 @@ class LoadTest(unittest.TestCase):
                     history.as_data(),
                     {
                         "hub_started": [],
-                        "records": {KEY: {"recorded_since": ms(at(11, 10, 9)), "entries": []}},
+                        "records": {
+                            KEY: {"recorded_since": ms(at(11, 10, 9)), "last_seen": None, "entries": []}
+                        },
                     },
                 )
+
+
+class TimedStore:
+    """Writes as status_history_store.py does: ``SAVE_DELAY`` after the history
+    asks, on a timer that nothing moves."""
+
+    def __init__(self, now):
+        self.now = now
+        self.due = None
+        self.writes = []
+        self.history = status_history.BNGntStatusHistory(lambda: TZ, RESTART_WINDOW, self._unsaved)
+        self.history.load(None, [KEY], now)
+        self.run_until(now + SAVE_DELAY)
+        self.writes.clear()
+
+    def _unsaved(self):
+        if self.due is not None:
+            raise AssertionError("asked for a save while one was due")
+        self.due = self.now + SAVE_DELAY
+
+    def run_until(self, when):
+        while self.due is not None and self.due <= when:
+            self.now, self.due = self.due, None
+            self.writes.append((self.now, self.history.data_to_save()))
+        self.now = when
+
+
+class SavingTest(unittest.TestCase):
+    def test_a_steady_stream_of_changes_is_saved_within_the_minute(self):
+        start = at(11, 10, 9)
+        store = TimedStore(start - SAVE_DELAY)
+        # A device dropping off and coming back every 20 seconds for 5 minutes.
+        # Each change, and the index of the write that holds it.
+        changes = []
+        for index in range(15):
+            when = start + index * 20
+            store.run_until(when)
+            if index % 2 == 0:
+                offline(store.history, when)
+            else:
+                online(store.history, when)
+            changes.append((when, len(store.writes)))
+        store.run_until(start + 15 * MINUTE)
+
+        self.assertEqual(
+            [when for when, _ in store.writes],
+            [start + minutes * MINUTE for minutes in range(1, 6)],
+        )
+        for when, write in changes:
+            self.assertLessEqual(store.writes[write][0] - when, SAVE_DELAY)
+        self.assertEqual(store.writes[-1][1], store.history.as_data())
+        self.assertFalse(store.history.has_unsaved_changes)
+
+    def test_heartbeats_are_saved_once_a_minute_and_nothing_else_writes(self):
+        start = at(11, 10, 9)
+        store = TimedStore(start - SAVE_DELAY)
+        for minute in range(3):
+            when = start + minute * MINUTE + 5
+            store.run_until(when)
+            online(store.history, when, was_online=True, online_since=start)
+        store.run_until(start + 30 * MINUTE)
+        self.assertEqual(
+            [(when, data["records"][KEY]["last_seen"]) for when, data in store.writes],
+            [
+                (start + 65, ms(start + 5)),
+                (start + 125, ms(start + 65)),
+                (start + 185, ms(start + 125)),
+            ],
+        )
+
+
+class LateCauseTest(unittest.TestCase):
+    """A state update, or a registration without a cause, brings the record
+    back, and the connection's registration with its cause follows."""
+
+    def came_online(self, history, when=None):
+        return [
+            (entry["cause"], entry["first_at"], entry["last_at"], entry["count"])
+            for entry in day_entries(history.answer(KEY, when or at(11, 10, 12)), 0)
+            if entry["kind"] == "came_online"
+        ]
+
+    def test_the_cause_goes_on_the_entry_just_recorded(self):
+        # The history gets the same call from a state update as from a
+        # registration without a cause.
+        for first in ("state update", "registration without a cause"):
+            with self.subTest(first=first):
+                history, _ = make()
+                back = at(11, 10, 9)
+                offline(history, back - 5 * MINUTE)
+                self.assertEqual(online(history, back), back)
+                registered = back + 5
+                result = online(
+                    history, registered, cause="device_restarted", was_online=True, online_since=back
+                )
+                self.assertEqual(result, registered)
+                self.assertEqual(self.came_online(history), [("device_restarted", ms(back), ms(back), 1)])
+
+    def test_up_to_180_seconds_either_way(self):
+        for gap, expected in (
+            (180, [("zendo_restarted", 0, 0, 1)]),
+            (-180, [("zendo_restarted", 0, 0, 1)]),
+            (180.001, [("zendo_restarted", 180.001, 180.001, 1), (None, 0, 0, 1)]),
+        ):
+            with self.subTest(gap=gap):
+                history, _ = make()
+                back = at(11, 10, 9)
+                online(history, back)
+                online(history, back + gap, cause="zendo_restarted", was_online=True, online_since=back)
+                self.assertEqual(
+                    self.came_online(history),
+                    [
+                        (cause, ms(back + first), ms(back + last), count)
+                        for cause, first, last, count in expected
+                    ],
+                )
+
+    def test_a_merged_entry_without_a_cause_is_left_alone(self):
+        history, _ = make()
+        back = at(11, 10, 9)
+        online(history, back - 2 * MINUTE)
+        online(history, back)
+        online(history, back + 5, cause="reconnected", was_online=True, online_since=back)
+        self.assertEqual(
+            self.came_online(history),
+            [("reconnected", ms(back + 5), ms(back + 5), 1), (None, ms(back - 2 * MINUTE), ms(back), 2)],
+        )
+
+    def test_one_that_isnt_the_newest_entry_is_left_alone(self):
+        history, _ = make()
+        back = at(11, 10, 9)
+        online(history, back)
+        offline(history, back + 30)
+        online(history, back + 60, cause="device_restarted")
+        self.assertEqual(
+            self.came_online(history),
+            [("device_restarted", ms(back + 60), ms(back + 60), 1), (None, ms(back), ms(back), 1)],
+        )
+
+    def test_one_with_a_cause_keeps_it(self):
+        history, _ = make()
+        back = at(11, 10, 9)
+        online(history, back, cause="device_restarted")
+        online(history, back + 5, cause="reconnected", was_online=True, online_since=back)
+        self.assertEqual(
+            self.came_online(history),
+            [("reconnected", ms(back + 5), ms(back + 5), 1), ("device_restarted", ms(back), ms(back), 1)],
+        )
+
+    def test_it_asks_for_a_save(self):
+        history, changes = make()
+        back = at(11, 10, 9)
+        online(history, back)
+        saved(history, changes)
+        online(history, back + 5, cause="reconnected", was_online=True, online_since=back)
+        self.assertEqual(changes.count, 1)
+        self.assertEqual(history.as_data()["records"][KEY]["entries"][0]["cause"], "reconnected")
 
 
 if __name__ == "__main__":

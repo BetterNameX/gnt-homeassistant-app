@@ -28,6 +28,7 @@ Records are persisted in the config entry under `managed_devices`, keyed by mana
 - A device that times out keeps the time of its last heartbeat. The offline check doesn't move it.
 - It is written to the config entry when a device registers, is replaced or is deleted, when it goes online or offline, when Home Assistant stops and when the integration is unloaded, not on every heartbeat. Writing it at stop is what keeps the last heartbeat across a restart. Without it, a device that was online would come back with the time it last came online.
 - A write at stop lands: the config entry store saves at Home Assistant's final write, which runs after every stop listener.
+- The status history keeps it too, from UNRELEASED, and writes it at most a minute after each heartbeat (see [History Storage](#history-storage)). When Home Assistant doesn't stop cleanly, after a power cut for example, nothing is written at stop, and the config entry has the `last_seen` of the record's last transition, which can be days old. So a record is restored with the later of the two.
 
 ---
 
@@ -62,7 +63,7 @@ From UNRELEASED. `online_since` is a Unix timestamp in seconds: when the record'
 
 ### After a Restart
 
-Every record is restored offline, as above, but a reload or a restart doesn't mean its device lost contact. A record that was online when Home Assistant stopped is restored **awaiting its device**, with the `online_since` and `last_seen` it had, until the **restart window** closes, 180 seconds (the offline timeout) after Home Assistant has started. At a reload, that's when the integration starts. At a Home Assistant start, it's when Home Assistant has started, after every integration has set up. Until the window closes:
+Every record is restored offline, as above, but a reload or a restart doesn't mean its device lost contact. A record that was online when Home Assistant stopped is restored **awaiting its device**, with the `online_since` it had and its last heartbeat, the later of the config entry's `last_seen` and the history's (see [Records and Managed Device IDs](#records-and-managed-device-ids)), until the **restart window** closes, 180 seconds (the offline timeout) after Home Assistant has started. At a reload, that's when the integration starts. At a Home Assistant start, it's when Home Assistant has started, after every integration has set up. Until the window closes:
 
 - **The record shows offline**, with `offline_reason: timeout` and `online_since: null`, and its entities are unavailable, until its device is heard from, as for any restored record.
 - **Its device's state update, or a registration without a `connect_cause`,** brings it back online with the `online_since` it had before. A record persisted by a version before UNRELEASED has none, so it gets now.
@@ -70,7 +71,7 @@ Every record is restored offline, as above, but a reload or a restart doesn't me
 - **The status history** treats the record as online all along: a restart its device rides out records only the `hub_started` entry (see [What's Recorded](#whats-recorded)).
 - **Persisting** writes the record as online, with no `offline_reason` and the `online_since` it had, so a second restart before its device comes back restores it awaiting again.
 
-Once the window closes with the device still not back, the record is no longer awaiting it: its history records `went_offline` with `reason: timeout` at its `last_seen`, the last heartbeat before the restart, and the record is persisted as offline. Nothing else changes: it was already offline. The offline check and each transition close it, so this is written within a minute of the window closing.
+Once the window closes with the device still not back, the record is no longer awaiting it: its history records `went_offline` with `reason: timeout` at its `last_seen`, the last heartbeat before the restart, and the record is persisted as offline. That's the later of the config entry's and the history's, so after a power cut too it's close to when the device was last heard from. A record with neither is recorded at the hub's start. A last heartbeat from before the record's history began, such as one known only from the config entry, is recorded at the record's `recorded_since`, which never moves (see [`zendo/v2/get_managed_device_status_history`](#zendov2get_managed_device_status_history)). Nothing else changes: it was already offline. The offline check and each transition close it, so this is written within a minute of the window closing.
 
 A record that was offline when Home Assistant stopped isn't awaiting anything: a restart didn't drop its connection.
 
@@ -884,14 +885,15 @@ Each entry is one event, or several of the same kind merged (see [Merging](#merg
 - **`went_offline`**
   - when the offline check marks an online record offline: `reason: timeout`, at its `last_seen`, the last heartbeat, not when the check noticed;
   - when an online record is unregistered, by its device or by a revoke: `reason: unregistered`, at now;
-  - when the restart window closes with a record still awaiting its device: `reason: timeout`, at its `last_seen` (see [After a Restart](#after-a-restart)).
+  - when the restart window closes with a record still awaiting its device: `reason: timeout`, at its last heartbeat (see [After a Restart](#after-a-restart)).
   - Nothing when a record that's already offline is unregistered.
 - **`came_online`**
   - when a state update or a registration brings an offline record back online, with the registration's `connect_cause`, or `null`;
   - when a registration with a `connect_cause` arrives for a record that's already online: a quick restart or reconnection that came back before the offline check noticed.
+  - Not a second entry when a state update, or a registration without a cause, brought the record back just before its connection's registration with a cause: when the record's newest entry is a `came_online` with no cause and `count: 1`, whose `last_at` is within 180 seconds of the registration, either way, that entry takes the cause. An entry merged from several, one that isn't the newest or one further away keeps `null`, and the cause is recorded as a new entry. `online_since` moves to now all the same. The Homey app has the same rule and the same 180 seconds.
   - Nothing for a registration without a `connect_cause` on an online record, or for a new record's first registration, where its history starts.
   - Nothing, within the restart window, for a registration with `reconnected` for a record that was online when Home Assistant stopped, one awaiting its device: the restart dropped that connection, and the `hub_started` entry says so. Any other cause is recorded. A state update or a registration without a cause records nothing either, as for any online record. A record that was already offline before the restart is coming back for real, and its return is recorded whatever its cause.
-- **`hub_started`**: each time the integration starts, at a Home Assistant start or a reload. It's kept once for the whole hub, not for each record, and every record's answer has it.
+- **`hub_started`**: each time the integration starts, at a Home Assistant start or a reload. It's kept once for the whole hub, not for each record, and every record's answer has those from its `recorded_since` on.
 - **A replace records nothing.**
 
 So a restart never records `went_offline` for a device that was online before it and is back within the restart window.
@@ -903,7 +905,8 @@ So a restart never records `went_offline` for a device that was online before it
 | `connect_cause` | Meaning |
 |---|---|
 | `device_restarted` | The device itself restarted since Zendo last ran there. |
-| `zendo_restarted` | Zendo started again, and the device didn't restart. |
+| `zendo_reloaded` | Someone asked for Zendo to reload, from the Zendo app, an automation or the device itself, and the device didn't restart. |
+| `zendo_restarted` | Zendo started again for any other reason, such as an update, and the device didn't restart. |
 | `reconnected` | Zendo kept running, and its connection to Home Assistant came back. |
 
 - **It's read loosely.** A string matching `^[a-z][a-z_]{0,31}$` is a cause, and anything else, `null` included, counts as none: a registration is never refused over it. A value the integration doesn't know is still a cause: it's kept as it came, and it sets `online_since`.
@@ -924,7 +927,9 @@ So that a device that keeps restarting can't flood its history, before adding an
 
 ### History Storage
 
-The history is in its own store, `.storage/zendo.managed_device_status_history` (`Store` version 1), written like the admin codes' (see [Storage](#storage)): `private=True`, with atomic writes, loaded before the registry starts, and flushed when the integration unloads. A change is made in memory at once, and written with `async_delay_save` at most once a minute: the store keeps the earliest pending write, so changes in a busy minute don't push it back. Home Assistant's final write at stop saves a pending one. Losing the last minute on a crash is acceptable.
+The history is in its own store, `.storage/zendo.managed_device_status_history` (`Store` version 1), written like the admin codes' (see [Storage](#storage)): `private=True`, with atomic writes, loaded before the registry starts, and flushed when the integration unloads. A change is made in memory at once. The first change since the last write starts the store's own timer, `SAVE_DELAY`, 60 seconds, and when it fires the store writes every change made since. A change while the timer runs never restarts it, so a steady run of changes, such as a device that keeps dropping off and coming back, is still written within a minute of the first, and the changes after that start the timer again. The write itself goes through `async_delay_save` with no delay, so nothing `Store` does with its own delay can put it off. Home Assistant's final write at stop saves a pending change. Losing the last minute on a crash is acceptable.
+
+Every heartbeat moves a record's `last_seen` in the history, so while a device is online the file is written about once a minute.
 
 ```json
 {
@@ -934,6 +939,7 @@ The history is in its own store, `.storage/zendo.managed_device_status_history` 
   "records": {
     "md_3f2a9c0e8b7d4c1e9a6f5b4d3c2e1f00": {
       "recorded_since": 1793174400000,
+      "last_seen": 1793268000000,
       "entries": [
         {"kind": "went_offline", "reason": "timeout", "cause": null, "first_at": 1793264400000, "last_at": 1793264400000, "count": 1},
         {"kind": "came_online", "reason": null, "cause": "device_restarted", "first_at": 1793264700000, "last_at": 1793264700000, "count": 1}
@@ -943,12 +949,15 @@ The history is in its own store, `.storage/zendo.managed_device_status_history` 
 }
 ```
 
+- `last_seen` is the record's last heartbeat or registration, in milliseconds since the Unix epoch, or `null` until the history has had one. It's only for a restart (see [After a Restart](#after-a-restart)): no answer gives it. A history saved without it, by an earlier version, loads with `null`.
+
 | When | The record's history |
 |---|---|
-| A record is created | Started, with `recorded_since` now and no entries. |
+| A record is created | Started, with `recorded_since` and `last_seen` now and no entries. |
+| A registration or a state update | `last_seen` moves to now. |
 | `unregister_managed_device` | Kept, with a `went_offline` entry when the record was online. |
 | `zendo/v2/delete_managed_device`, or the Delete button | Removed. |
-| A replace | The target keeps its own. The replacement's is removed with the record it leaves behind. |
+| A replace | The target keeps its own, and takes the replacement's `last_seen`. The replacement's is removed with the record it leaves behind. |
 | Home Assistant starts | Dropped if the record is gone. A record with none starts one now: at the first start of UNRELEASED, every record does. Entries that aren't valid are dropped. |
 | The integration is removed | The file is removed, in `async_remove_entry`. |
 
@@ -981,8 +990,8 @@ The result:
 }
 ```
 
-- **`days`** is always exactly 3 days, today first, each with its `date` as `YYYY-MM-DD` in Home Assistant's time zone. Each day's `entries` are newest first by `last_at`, the `hub_started` ones among them, and of two at the same time, the one added later comes first. A day with nothing has `entries: []`.
-- **`recorded_since`** is when the integration started keeping this record's history, in milliseconds since the Unix epoch: the later of when the record was made and the first start of UNRELEASED. Before it there's no history, which isn't the same as no events. A `went_offline` recorded when the restart window closes is at the record's last heartbeat, which can be earlier, so `recorded_since` moves back to it: no entry is ever before `recorded_since`.
+- **`days`** is always exactly 3 days, today first, each with its `date` as `YYYY-MM-DD` in Home Assistant's time zone. Each day's `entries` are newest first by `last_at`, the `hub_started` ones from `recorded_since` on among them, and of two at the same time, the one added later comes first. A day with nothing has `entries: []`.
+- **`recorded_since`** is when the integration started keeping this record's history, in milliseconds since the Unix epoch: the later of when the record was made and the first start of UNRELEASED. Before it there's no history, which isn't the same as no events. It never moves, and no entry is ever before it. An event from before it, such as the timeout of a device last heard from before its history began, is recorded at `recorded_since`. A `hub_started` entry whose `first_at` is before it is left out, even one merged with a later start.
 - **It reads only the history** and sends nothing to the device, so it works while the device is offline. Reading drops the entries older than the 3 days, and saves when it dropped any.
 - **`target_not_found`** answers a `managed_device_id` that no record has.
 - A `managed_device_id` that's missing, empty or not a string fails with `invalid_format` and `Invalid managed_device_id`.
@@ -1513,7 +1522,7 @@ The automation services, `send_notification`, `ring_doorbell`, `refresh_profiles
 
 ### Tests
 
-`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device` and `app_lock_pin_lookup_for_attached_device`, what an admin's lookup of an admin code or a Device Lock PIN answers for a device that hasn't registered, and what the PIN's sealed answer opens to, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_reported_codes.py` checks `reported_codes.py`, for the admin code store's field and the Device Lock PIN store's: which values are a code or a PIN (4, 6 or 8 ASCII digits), the statuses, reporting and removing, and which entries a load keeps. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. `tests/test_status_history.py` checks `status_history.py` (see [Status History](#status-history)): reading `connect_cause`, merging, the split into days in the time zone, the 3 days kept on write, read and load, the 50-entry backstop, `online_since` after each kind of registration and state update, the restart window (no `went_offline` for a device back within it, `reconnected` and the other causes in it, when it opens and closes, and a record that was offline before the restart), records made, removed and replaced, the answer's shape and order, and loading what isn't valid. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
+`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device` and `app_lock_pin_lookup_for_attached_device`, what an admin's lookup of an admin code or a Device Lock PIN answers for a device that hasn't registered, and what the PIN's sealed answer opens to, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_reported_codes.py` checks `reported_codes.py`, for the admin code store's field and the Device Lock PIN store's: which values are a code or a PIN (4, 6 or 8 ASCII digits), the statuses, reporting and removing, and which entries a load keeps. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. `tests/test_status_history.py` checks `status_history.py` (see [Status History](#status-history)): reading `connect_cause`, merging, the split into days in the time zone, the 3 days kept on write, read and load, the 50-entry backstop, `online_since` after each kind of registration and state update, a cause given to the `came_online` just recorded without one, the restart window (no `went_offline` for a device back within it, `reconnected` and the other causes in it, when it opens and closes, and a record that was offline before the restart), the last heartbeat after a power cut, `recorded_since` never moving back, the `hub_started` entries from before it left out, records made, removed and replaced, the answer's shape and order, when a change asks for a save, with a store that writes as `status_history_store.py` does, and loading what isn't valid. The handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
 
 ```sh
 python3 -m unittest discover -s tests -v

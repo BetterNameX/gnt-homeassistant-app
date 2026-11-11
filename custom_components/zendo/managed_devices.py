@@ -49,8 +49,10 @@ Persistence: each record's metadata, ``offline_reason``, ``last_seen``,
 ``online_since`` and the optional entities it has (not its runtime state)
 are stored in the config entry so entities survive HA restarts.
 ``last_seen`` is also written when HA stops, so it keeps the last heartbeat
-across a restart. On boot, entities are restored as unavailable until the
-device reconnects and re-registers.
+across a restart, and the status history saves it within a minute or so, so
+after a crash a record is restored with the later of the two. On boot,
+entities are restored as unavailable until the device reconnects and
+re-registers.
 
 Status history: ``status_history.py`` keeps what happened to each record's
 connection, by managed device ID, and the registry tells it each transition.
@@ -1496,11 +1498,10 @@ class BNGntManagedDeviceRegistry:
 
     def _restore_device(self, key: str, info: dict) -> None:
         offline_reason = info.get("offline_reason")
+        last_seen = _restored_timestamp(info.get("last_seen"))
         if offline_reason not in OFFLINE_REASONS:
             self._history.await_reconnect(
-                key,
-                _restored_timestamp(info.get("online_since")),
-                _restored_timestamp(info.get("last_seen")),
+                key, _restored_timestamp(info.get("online_since")), last_seen
             )
         self._devices[key] = {
             **info,
@@ -1517,7 +1518,7 @@ class BNGntManagedDeviceRegistry:
                 if offline_reason in OFFLINE_REASONS
                 else OFFLINE_REASON_TIMEOUT
             ),
-            "last_seen": info.get("last_seen"),
+            "last_seen": self._history.restored_last_seen(key, last_seen),
             "online_since": None,
             "state": {},
             "ha_device_id": None,
