@@ -157,6 +157,7 @@ EVENT_DEVICE_CALL = "bngnt_device_call"
 EVENT_DEVICE_CALL_UPDATE = "bngnt_device_call_update"
 EVENT_SUBSCRIPTIONS_ENDED = "bngnt_subscriptions_ended"
 EVENT_SITE_CONFIG_MANIFEST_UPDATED = "bngnt_site_config_manifest_updated"
+EVENT_SITE_CONFIG_RESTORE = "bngnt_site_config_restore"
 EVENT_DOORBELL_RING = "bngnt_doorbell_ring"
 EVENT_DOORBELL_ACTION = "bngnt_doorbell_action"
 
@@ -165,6 +166,7 @@ EVENT_DOORBELL_ACTION = "bngnt_doorbell_action"
 # tells it it now holds another record.
 _EVENTS_FOR_EVERY_DEVICE = (
     EVENT_SITE_CONFIG_MANIFEST_UPDATED,
+    EVENT_SITE_CONFIG_RESTORE,
     EVENT_DOORBELL_RING,
     EVENT_DOORBELL_ACTION,
     EVENT_MANAGED_DEVICE_REPLACED,
@@ -1662,6 +1664,32 @@ async def ws_notify_site_config_manifest_update(
 
 
 @websocket_api.websocket_command(
+    _schema(
+        f"{WS_PREFIX}notify_site_config_restore",
+        {**_TOKEN, **_optional("payload")},
+    )
+)
+@websocket_api.async_response
+async def ws_notify_site_config_restore(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Tell every device that a backup restore of the site config started or ended.
+
+    ``payload`` is the app's own, and is passed on unread.
+    """
+    checked = await _admin_registry(hass, connection, msg)
+    if checked is None:
+        return
+    try:
+        payload = _string(msg, "payload")
+    except _InvalidField as err:
+        _invalid(connection, msg["id"], err)
+        return
+    hass.bus.async_fire(EVENT_SITE_CONFIG_RESTORE, {"payload": payload})
+    connection.send_result(msg["id"], {"success": True})
+
+
+@websocket_api.websocket_command(
     _schema(f"{WS_PREFIX}claim_encryption_key", {**_TOKEN, **_optional("key")})
 )
 @websocket_api.async_response
@@ -1786,6 +1814,7 @@ _COMMANDS = (
     ws_get_managed_device_status_history,
     ws_set_deep_link_destinations,
     ws_notify_site_config_manifest_update,
+    ws_notify_site_config_restore,
     ws_claim_encryption_key,
     ws_call_device,
 )
