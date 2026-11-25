@@ -17,6 +17,25 @@
       },
       "wake_on_approach_sensitivity": {
         "default": "mdi:signal-distance-variant"
+      },
+      "language": {
+        "default": "mdi:translate"
+      },
+      "temperature_unit": {
+        "default": "mdi:thermometer",
+        "state": {
+          "celsius": "mdi:temperature-celsius",
+          "fahrenheit": "mdi:temperature-fahrenheit"
+        }
+      },
+      "measurement_system": {
+        "default": "mdi:ruler"
+      },
+      "clock": {
+        "default": "mdi:clock-outline"
+      },
+      "first_weekday": {
+        "default": "mdi:calendar-week-begin"
       }
     },
     "binary_sensor": {
@@ -82,6 +101,9 @@
     },
     "managed_device_wake_on_approach_configure": {
       "service": "mdi:motion-sensor"
+    },
+    "managed_device_language_region_configure": {
+      "service": "mdi:translate"
     },
     "managed_device_admin_code_configure": {
       "service": "mdi:shield-key"

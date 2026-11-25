@@ -194,6 +194,16 @@ JSONRPC_METHOD_NOT_FOUND = -32601
 ON_OFF = ["on", "off"]
 WAKE_ON_APPROACH_SENSITIVITIES = ["very_close", "close", "medium", "far"]
 
+# Language and region's values other than the language, in both the state the
+# app reports and ``locale.set``, which also takes ``automatic``. There's no
+# list of languages: the app owns it, and the device refuses one it doesn't
+# have.
+LANGUAGE_REGION_AUTOMATIC = "automatic"
+TEMPERATURE_UNITS = ["celsius", "fahrenheit"]
+MEASUREMENT_SYSTEMS = ["metric", "uk", "us"]
+CLOCKS = ["12_hour", "24_hour"]
+FIRST_WEEKDAYS = ["monday", "sunday"]
+
 # What a replace copies from the replacement's record into the target's. Not
 # ``optional_entities``: those are entities of the target's HA device, which
 # the target keeps.
@@ -329,6 +339,53 @@ SENSOR_PROPERTIES: dict[str, dict] = {
         "native_unit": None,
         "state_key": "wake_on_approach_sensitivity",
         "options": WAKE_ON_APPROACH_SENSITIVITIES,
+        "optional": True,
+    },
+    # Language and region: the values in effect on the device, never
+    # automatic. An app that predates them doesn't report them. The language
+    # isn't an enum, so one a later app adds reads as itself, not as unknown.
+    "language": {
+        "translation_key": "language",
+        "device_class": None,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "language",
+        "optional": True,
+    },
+    "temperature_unit": {
+        "translation_key": "temperature_unit",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "temperature_unit",
+        "options": TEMPERATURE_UNITS,
+        "optional": True,
+    },
+    "measurement_system": {
+        "translation_key": "measurement_system",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "measurement_system",
+        "options": MEASUREMENT_SYSTEMS,
+        "optional": True,
+    },
+    "clock": {
+        "translation_key": "clock",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "clock",
+        "options": CLOCKS,
+        "optional": True,
+    },
+    "first_weekday": {
+        "translation_key": "first_weekday",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "native_unit": None,
+        "state_key": "first_weekday",
+        "options": FIRST_WEEKDAYS,
         "optional": True,
     },
 }
@@ -551,6 +608,38 @@ SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE_SCHEMA = vol.All(
         },
     ),
     cv.has_at_least_one_key("mode", "sensitivity"),
+)
+
+# Each field of the language and region service, and the ``locale.set`` param
+# it's sent as.
+LANGUAGE_REGION_PARAMS = {
+    "language": "language",
+    "temperature_unit": "temperatureUnit",
+    "measurement_system": "measurementSystem",
+    "clock": "clock",
+    "first_weekday": "firstWeekday",
+}
+
+SERVICE_MANAGED_DEVICE_LANGUAGE_REGION_CONFIGURE_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required("device"): _DEVICE_VALIDATOR,
+            # Any tag, for the device to accept or refuse, so a language a
+            # later app adds works with no release of the integration.
+            vol.Optional("language"): vol.All(cv.string, vol.Length(min=1)),
+            vol.Optional("temperature_unit"): vol.In(
+                [LANGUAGE_REGION_AUTOMATIC, *TEMPERATURE_UNITS]
+            ),
+            vol.Optional("measurement_system"): vol.In(
+                [LANGUAGE_REGION_AUTOMATIC, *MEASUREMENT_SYSTEMS]
+            ),
+            vol.Optional("clock"): vol.In([LANGUAGE_REGION_AUTOMATIC, *CLOCKS]),
+            vol.Optional("first_weekday"): vol.In(
+                [LANGUAGE_REGION_AUTOMATIC, *FIRST_WEEKDAYS]
+            ),
+        },
+    ),
+    cv.has_at_least_one_key(*LANGUAGE_REGION_PARAMS),
 )
 
 
@@ -2086,8 +2175,9 @@ async def handle_update_managed_device_state(
 # protocol uses camelCase (``colorScheme``). Conversion happens here.
 #
 # Settings-style RPC methods (screensaver.set, screen.set, audio.set,
-# wakeOnApproach.set) accept partial params -- only the fields present in the
-# service call are included. The device leaves omitted settings unchanged.
+# wakeOnApproach.set, locale.set) accept partial params -- only the fields
+# present in the service call are included. The device leaves omitted settings
+# unchanged.
 #
 # A wall panel setting goes only to the targets that have the sensor for it:
 # a device whose last state reports null for the setting is skipped. One
@@ -2244,6 +2334,22 @@ async def handle_managed_device_wake_on_approach_configure(
         registry.send_command(key, "wakeOnApproach.set", params)
         for key, params in params_by_key.items()
     ))
+
+
+async def handle_managed_device_language_region_configure(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    # Every target gets the command, whatever its state: an app that predates
+    # it answers Method not found, and the error says to update it.
+    registry, keys = _resolve_devices_for_command(hass, call)
+
+    params = {
+        param: call.data[field]
+        for field, param in LANGUAGE_REGION_PARAMS.items()
+        if field in call.data
+    }
+
+    await _fan_out_command(registry, keys, "locale.set", params)
 
 
 async def handle_managed_device_screen_wake_up(

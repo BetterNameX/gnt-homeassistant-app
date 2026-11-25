@@ -453,6 +453,7 @@ class MaySendCommandTest(unittest.TestCase):
         "screensaver.set",
         "autoBrightness.set",
         "wakeOnApproach.set",
+        "locale.set",
     )
 
     def test_a_pin_or_an_admin_code_needs_a_registered_device(self):

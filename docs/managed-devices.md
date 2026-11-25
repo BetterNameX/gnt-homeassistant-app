@@ -2,7 +2,7 @@
 
 > **Note:** This document is intended as context for AI-assisted development. For user-facing documentation, see https://docs.myzendo.com
 
-A managed device is a phone, tablet or wall panel running the Zendo app with Always-On Display (Kiosk) on. It registers with Home Assistant so automations can control it: wake the screen, set the brightness or volume, lock it, and so on. Each managed device is a Home Assistant device with its own sensor entities (battery, screen, volume, locked and so on). A wall panel can also have auto-brightness, wake on approach and presence entities (see [Wall Panel Settings and Presence](#wall-panel-settings-and-presence)).
+A managed device is a phone, tablet or wall panel running the Zendo app with Always-On Display (Kiosk) on. It registers with Home Assistant so automations can control it: wake the screen, set the brightness or volume, lock it, and so on. Each managed device is a Home Assistant device with its own sensor entities (battery, screen, volume, locked and so on). A wall panel can also have auto-brightness, wake on approach and presence entities (see [Wall Panel Settings and Presence](#wall-panel-settings-and-presence)), and from UNRELEASED a device on a current app has language and region entities, which automations can set too (see [Language and Region](#language-and-region)).
 
 The code lives in `custom_components/zendo/managed_devices.py`, the admin code in `admin_code.py` (see [Admin Code](#admin-code)), the Device Lock PIN in `app_lock_pin.py` (see [Device Lock PIN](#device-lock-pin)), the settings backup in `settings_backup.py` (see [Settings Backup](#settings-backup)) and the status history in `status_history.py` and `status_history_store.py` (see [Status History](#status-history)). The services and WebSocket commands are registered in `__init__.py`.
 
@@ -167,10 +167,17 @@ The admin code, the Device Lock PIN and the settings backup go through WebSocket
 | `wake_on_approach` | `on`, `off` or `null` | Wake on approach, from 1.9.3 |
 | `wake_on_approach_sensitivity` | `very_close`, `close`, `medium`, `far` or `null` | Wake on approach sensitivity, from 1.9.3 |
 | `presence` | `present`, `absent` or `null` | Presence, from 1.9.3 |
+| `language` | string: a locale tag, such as `it-IT` | Language, from UNRELEASED |
+| `temperature_unit` | `celsius` or `fahrenheit` | Temperature unit, from UNRELEASED |
+| `measurement_system` | `metric`, `uk` or `us` | Measurement system, from UNRELEASED |
+| `clock` | `12_hour` or `24_hour` | Clock, from UNRELEASED |
+| `first_weekday` | `monday` or `sunday` | First weekday, from UNRELEASED |
 
 `ip_address`, `wifi_ssid` and `wifi_signal` are only for device status in the app, so they have no entities. The app sends `null` for any of them it can't read. A change in `wifi_signal` alone fires no event (see [Events](#events)).
 
-The last four are a wall panel's settings and presence sensor. Their entities are made only once the device reports a value for them. See [Wall Panel Settings and Presence](#wall-panel-settings-and-presence).
+`auto_brightness`, `wake_on_approach`, `wake_on_approach_sensitivity` and `presence` are a wall panel's settings and presence sensor. Their entities are made only once the device reports a value for them. See [Wall Panel Settings and Presence](#wall-panel-settings-and-presence).
+
+The last five are the device's language and region, the values in effect on it. Their entities are made only once the device reports a value for them too. See [Language and Region](#language-and-region).
 
 ### Error Codes
 
@@ -316,10 +323,12 @@ These services are for automations to control a device. Each takes `device`, one
 | `managed_device_app_unlock` (admin only) | none | `app.unlock` |
 | `managed_device_auto_brightness_configure` (from 1.9.3) | `mode`: `on` or `off` | `autoBrightness.set` `{mode}` |
 | `managed_device_wake_on_approach_configure` (from 1.9.3) | optional `mode`: `on` or `off`, optional `sensitivity`: `very_close`, `close`, `medium` or `far`; at least one of them | `wakeOnApproach.set` `{mode?, sensitivity?}` |
+| `managed_device_language_region_configure` (from UNRELEASED) | optional `language`, `temperature_unit`, `measurement_system`, `clock` and `first_weekday`, each a value or `automatic`; at least one of them | `locale.set` `{language?, temperatureUnit?, measurementSystem?, clock?, firstWeekday?}` |
 | `managed_device_admin_code_configure` (from 1.9.3, admin only) | `code`, or `remove: true` | `adminCode.set` `{code}`, with `code: null` to remove it |
 
 - A settings method gets only the fields the call has, and the device leaves the rest unchanged.
 - The auto-brightness and wake on approach services skip the devices that don't support the setting. See [Changing the Settings](#changing-the-settings).
+- `managed_device_language_region_configure` sends `locale.set` to every device, whatever its state. See [Language and Region](#language-and-region).
 - The admin-only services are registered with `async_register_admin_service`: a call from a user who isn't an administrator is refused with `Unauthorized`, and a call with no user, such as one from an automation, is allowed.
 - `managed_device_admin_code_configure` handles its errors its own way: the devices that take the change keep it, and the error names the others. See [Admin Code](#admin-code).
 - `managed_device_app_lock` and `managed_device_app_unlock` don't write the Device Lock PIN store: the device reports its PIN, or that it isn't locked, before it answers. See [Device Lock PIN](#device-lock-pin).
@@ -333,7 +342,7 @@ The call fails when a device is offline, when it doesn't answer within 10 second
 |---|---|---|
 | `-32601` | Method not found: the app on the device predates the command. | `Device '<name>' needs a newer version of the Zendo app` |
 | `-32001` | Not supported: the device has no light sensor or no wake sensor, or it got a sensitivity and has no levels. | `Device returned error: <message>` |
-| `-32602` | Invalid params. | `Device returned error: <message>` |
+| `-32602` | Invalid params, such as a `language` the device doesn't have. | `Device returned error: <message>` |
 
 - From 1.9.3, Method not found reads as needing a newer app for every command, not only the new ones.
 - `-32001` is rare: the services don't send a setting to a device whose last state says it doesn't support it.
@@ -367,7 +376,7 @@ Zendo isn't set up on Home Assistant yet. An admin needs to open the Zendo app, 
 
 - **One rule, in `send_command`.** Before it sends anything, it asks `command_refusal` in `device_auth.py`, so every caller gets the same answer. That checks whether the method can go to the device, with `may_send_command`, and then the link and whether the device is online. The methods are `MUST_ENCRYPT_METHODS`. A refusal raises `BNGntManagedDeviceAppUpdateRequiredError`, the same error Method not found raises, or `BNGntManagedDeviceNotLinkedError` on a Home Assistant that isn't linked.
 - **An offline device fails as offline**, whichever app it's on. The exception is a method it can't get on a Home Assistant that isn't linked: that error comes first, since bringing the device online wouldn't help.
-- **Every other command is unchanged** for a device that hasn't registered: `app.unlock`, `app.reload`, the screen, audio, screensaver, wake up, auto-brightness and wake on approach commands still reach it as a `bngnt_managed_device_command` event.
+- **Every other command is unchanged** for a device that hasn't registered: `app.unlock`, `app.reload`, the screen, audio, screensaver, wake up, auto-brightness and wake on approach commands still reach it as a `bngnt_managed_device_command` event. So does `locale.set`, from UNRELEASED.
 - **The device's reports still count.** A device that hasn't registered still reports its admin code with `zendo/report_managed_device_admin_code`, so the store keeps it and its `admin_code_status` in the list reads as before. `zendo/v2/get_managed_device_admin_code` answers `unknown` for it until it registers (see [`zendo/v2/get_managed_device_admin_code`](#zendov2get_managed_device_admin_code)). A Device Lock PIN report is v2 only, so such a device has none, and `zendo/v2/get_managed_device_app_lock_pin` answers `unknown` for it too (see [Device Lock PIN](#device-lock-pin)).
 
 ---
@@ -402,7 +411,7 @@ From 1.9.3, a wall panel running Zendo reports its auto-brightness and wake on a
 
 ### Created When Reported
 
-A record gets each of these four entities only once a state update has a value other than `null` for it. A phone or tablet without the sensor never gets an entity that is always unknown.
+A record gets each of these four entities, and from UNRELEASED each of the five language and region entities (see [Language and Region](#language-and-region)), only once a state update has a value other than `null` for it. A phone or tablet without the sensor, or on an app that predates language and region, never gets an entity that is always unknown.
 
 - An entity stays once it's made, even if the device later reports `null` or another device takes over the record. It then reads as unknown.
 - The record lists them in `optional_entities`, which is persisted, so they're restored at startup with the others, unavailable until the device's first heartbeat.
@@ -428,6 +437,59 @@ Use it to react to someone at the panel, not to tell whether anyone is in the ar
 - A `sensitivity` goes only to a device whose `wake_on_approach_sensitivity` isn't `null`. A device without levels still gets the `mode` when the call has one, and is skipped when it doesn't.
 - If that leaves no device, the call fails with a validation error saying the selected devices don't support it.
 - A device whose state doesn't have the key is still sent the command: an older app, or a device that hasn't sent its state since Home Assistant started. An older app answers Method not found, and an offline device fails as offline.
+
+## Language and Region
+
+From UNRELEASED. A device reports the language Zendo shows on it and how Zendo shows temperatures, distances, times and calendars, and an automation sets them with `managed_device_language_region_configure`: a guest's language when they check in at a hotel, or a relative's while they stay over, and Automatic when they leave. These are the device's own Language & Region settings, the ones its Settings and an admin's Control Panels change, so there's no override on top of them: the device shows what Home Assistant set, keeps it until it's changed again, and its settings backup carries it as before. Only Zendo's language and region change, never the operating system's.
+
+The Homey app has the same action, `managed_device_configure_language_region`, with the same values and the same rules: keep the two in sync.
+
+### Language and Region State
+
+| Key | Values |
+|---|---|
+| `language` | A locale tag, such as `it-IT` |
+| `temperature_unit` | `celsius` or `fahrenheit` |
+| `measurement_system` | `metric`, `uk` or `us` |
+| `clock` | `12_hour` or `24_hour` |
+| `first_weekday` | `monday` or `sunday` |
+
+- **The values in effect on the device**, what it shows now, never `automatic`. A setting on Automatic reports what the device's own language and region give.
+- **An app with language and region always reports all five**, never `null`: with each heartbeat, after a command's answer, and when one changes on the device or from an admin's Control Panels.
+- **Loose strings on the wire.** The integration stores the state as it comes, so only the entities know the keys, and an older integration keeps and lists them too.
+
+### Language and Region Entities
+
+| Entity | Type | States |
+|---|---|---|
+| Language | Sensor | The tag, such as `it-IT` |
+| Temperature unit | Sensor, enum | Celsius (°C), Fahrenheit (°F) |
+| Measurement system | Sensor, enum | Metric, UK, US |
+| Clock | Sensor, enum | 24-hour, 12-hour (AM/PM) |
+| First weekday | Sensor, enum | Monday, Sunday |
+
+- **Language isn't an enum**, so a language a later app adds reads as its tag, with no release of the integration. An enum sensor reads a value it doesn't know as unknown (see [Entities](#entities)).
+- **Made only once reported.** Each is made with the first state update that has a value other than `null` for it, and listed in `optional_entities`, as the wall panel entities are (see [Created When Reported](#created-when-reported)). A device on an app that predates language and region never gets them.
+- Their names, state labels and icons come from `strings.json` and `icons.json` through translation keys.
+
+### `managed_device_language_region_configure`
+
+| Field | Values | `locale.set` param |
+|---|---|---|
+| `device` | One or more Home Assistant devices | - |
+| `language` | `automatic` or a locale tag | `language` |
+| `temperature_unit` | `automatic`, `celsius` or `fahrenheit` | `temperatureUnit` |
+| `measurement_system` | `automatic`, `metric`, `uk` or `us` | `measurementSystem` |
+| `clock` | `automatic`, `12_hour` or `24_hour` | `clock` |
+| `first_weekday` | `automatic`, `monday` or `sunday` | `firstWeekday` |
+
+- **At least one setting.** The schema ends in `cv.has_at_least_one_key`, so Home Assistant refuses a call with none before anything is sent. The device refuses an empty `locale.set` too.
+- **A field left out stays as it is.** The params have only the fields the call has, and `LANGUAGE_REGION_PARAMS` maps each field to its param, for the schema and the handler both. `automatic` clears the setting, so it follows the device again: its own language and region, and on a wall panel, the ones it was set up with.
+- **The language is any non-empty string.** The action's select lists the app's languages when the integration was released, each labelled in its own language as the app's picker shows it: Automatic, English (`en-GB`), English (US) (`en-US`), Deutsch (`de-DE`), Español (`es-ES`), Français (`fr-FR`), Italiano (`it-IT`) and Nederlands (`nl-NL`). The device takes exactly the tags its app has, case and all, and refuses any other, so a language a later app adds works from YAML or a template with no release of the integration. There's no list of languages in the code.
+- **The other four are checked** with `vol.In`, against `TEMPERATURE_UNITS`, `MEASUREMENT_SYSTEMS`, `CLOCKS` and `FIRST_WEEKDAYS` with `automatic`. The enum sensors' options are the same lists.
+- **Every target is sent the command**, whatever its state: there's no sensor for a device to lack. An app that predates it answers `-32601`, and `send_command` turns that into `Device '<name>' needs a newer version of the Zendo app`, as for every method.
+- **A device that refuses the command changes nothing**: it checks every param before it writes any. It answers `-32602` with a message naming the field and the values it takes, such as `language must be automatic or one of: en-GB, en-US, de-DE, es-ES, fr-FR, it-IT, nl-NL`, and the call fails with `Device returned error: <message>`. The message is the device's own, in English. As for any command, the error doesn't name the device.
+- **Not admin only.** Like the screen and audio services, it changes a display setting, and it's registered with them.
 
 ## Admin Code
 
@@ -1523,7 +1585,7 @@ The automation services, `send_notification`, `ring_doorbell`, `refresh_profiles
 
 ### Tests
 
-`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device` and `app_lock_pin_lookup_for_attached_device`, what an admin's lookup of an admin code or a Device Lock PIN answers for a device that hasn't registered, and what the PIN's sealed answer opens to, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_reported_codes.py` checks `reported_codes.py`, for the admin code store's field and the Device Lock PIN store's: which values are a code or a PIN (4, 6 or 8 ASCII digits), the statuses, reporting and removing, and which entries a load keeps. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. `tests/test_status_history.py` checks `status_history.py` (see [Status History](#status-history)): reading `connect_cause`, merging, the split into days in the time zone, the 3 days kept on write, read and load, the 50-entry backstop, `online_since` after each kind of registration and state update, a cause given to the `came_online` just recorded without one, the restart window (no `went_offline` for a device back within it, `reconnected` and the other causes in it, when it opens and closes, and a record that was offline before the restart), the last heartbeat after a power cut, `recorded_since` never moving back, the `hub_started` entries from before it left out, records made, removed and replaced, the answer's shape and order, when a change asks for a save, with a store that writes as `status_history_store.py` does, and loading what isn't valid. `tests/test_site_config_relays.py` runs the two site config relays, `zendo/v2/notify_site_config_manifest_update` and `zendo/v2/notify_site_config_restore`, through the same checks: the command's type and fields, an admin-scoped token answered and the event fired, a token without the admin scope refused, the payload passed on as it came, anything but a non-empty string refused, and every `zendo/v2/subscribe_events` subscription hearing the event. It loads the package's modules without their `__init__.py`, with a stand-in for each name they import from Home Assistant, voluptuous and aiohttp, and checks the admin scope with the shared vectors' tokens. Every other handler needs Home Assistant, so these tests don't run them. From the repository root, with PyJWT and cryptography installed (Home Assistant ships both):
+`tests/test_device_auth.py` checks `device_auth.py` against `tests/companion-app-authentication-vectors.json`, the cases the Zendo app and the Homey app check too: the tokens and what registering with each gives, the keys record as each resolver answers it, the envelopes and the sealed objects, each down to the same bytes, with their padding off through `padded=False`, as the vectors hold the JSON alone. It also checks the padding, `may_send_command`, which commands go to a device that hasn't registered, `command_refusal`, why a command isn't sent and which reason comes first, `site_link` and `push_token_serial`, what `zendo/v2/setup_status` answers, `link_retry_interval`, how long the link from a stored push token waits, and `admin_code_lookup_for_attached_device` and `app_lock_pin_lookup_for_attached_device`, what an admin's lookup of an admin code or a Device Lock PIN answers for a device that hasn't registered, and what the PIN's sealed answer opens to, and `held_encryption_key` and the answers built on it, which site config encryption key is held and what the two commands say about it, and `DeviceCallTable`, `invalid_device_call_field`, `invalid_device_call_update_field` and `lost_contact`, what a device call's envelopes open to, the rules of the calls in progress, the limits, the fields' checks and which records answer `target_offline`, and `is_device_token_label` and `is_invitation_token_label`, which long-lived tokens a revoke removes. `tests/test_reported_codes.py` checks `reported_codes.py`, for the admin code store's field and the Device Lock PIN store's: which values are a code or a PIN (4, 6 or 8 ASCII digits), the statuses, reporting and removing, and which entries a load keeps. `tests/test_time_urls.py` checks `time_urls.py` (see [The Time View](#the-time-view)): which addresses, internal URLs and Supervisor host names give a URL, that every URL is plain `http` and SSL gives none, the order, the cap, duplicates and the length limit, which adapters' addresses are read, both shapes of the Supervisor's host info, the view's answer, and that odd values never raise. `tests/test_status_history.py` checks `status_history.py` (see [Status History](#status-history)): reading `connect_cause`, merging, the split into days in the time zone, the 3 days kept on write, read and load, the 50-entry backstop, `online_since` after each kind of registration and state update, a cause given to the `came_online` just recorded without one, the restart window (no `went_offline` for a device back within it, `reconnected` and the other causes in it, when it opens and closes, and a record that was offline before the restart), the last heartbeat after a power cut, `recorded_since` never moving back, the `hub_started` entries from before it left out, records made, removed and replaced, the answer's shape and order, when a change asks for a save, with a store that writes as `status_history_store.py` does, and loading what isn't valid. `tests/test_site_config_relays.py` runs the two site config relays, `zendo/v2/notify_site_config_manifest_update` and `zendo/v2/notify_site_config_restore`, through the same checks: the command's type and fields, an admin-scoped token answered and the event fired, a token without the admin scope refused, the payload passed on as it came, anything but a non-empty string refused, and every `zendo/v2/subscribe_events` subscription hearing the event. It loads the package's modules without their `__init__.py`, with a stand-in for each name they import from Home Assistant, voluptuous and aiohttp, and checks the admin scope with the shared vectors' tokens. `tests/test_language_region.py` checks language and region (see [Language and Region](#language-and-region)): the action's schema (at least one setting, the four strict settings' values and `automatic`, any non-empty language, the fields), its `locale.set` params (only the fields given, in camelCase), that every target is sent the command whatever its state, the errors for `-32601`, `-32602` and an offline device, the five sensors made only once reported and only once, the language a plain sensor and the others enums that read a value they don't know as unknown, and that each translated sensor has its name and state labels in `strings.json`. It loads `managed_devices.py` the same way, but with the real voluptuous and copies of Home Assistant's `cv.string` and `cv.has_at_least_one_key`, so the schema accepts and refuses what Home Assistant's does, and runs the real registry with a stand-in device on the event bus that answers each command. The other handlers need Home Assistant, so these tests don't run them. From the repository root, with PyJWT, cryptography and voluptuous installed (Home Assistant ships all three):
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -1652,6 +1714,12 @@ From UNRELEASED (online since, the connect cause and the status history):
 - **Records persisted by an older integration.** They have no `online_since`. They're restored with none, with no migration step, and a record that was online when Home Assistant stopped gets now when its device is next heard from. Every record's history starts at the first start of UNRELEASED, its `recorded_since`.
 - **Downgrading below UNRELEASED.** The earlier version drops `online_since` the next time it persists the records, and doesn't know the history's store, so it leaves the file alone. After upgrading again, the history of the records that still exist comes back, less what's older than the 3 days, with the same `recorded_since`, so the time on the earlier version reads as no events. A record made on the earlier version starts its history then.
 - **Removing the integration** removes the file, as it does the admin codes'.
+
+From UNRELEASED (language and region):
+
+- **An older app with a UNRELEASED integration.** Its state has none of the five keys, so its records get none of the new entities. `managed_device_language_region_configure` still sends it `locale.set`, it answers Method not found, and the call fails saying the device needs a newer version of the Zendo app.
+- **A newer app with an older integration.** The integration stores the state as it comes, so it keeps the five keys and lists them in `zendo/v2/list_managed_devices`, but makes no entities for them and has no action. The app needs no version check for the state.
+- **Downgrading below UNRELEASED.** The earlier version keeps the new entities' keys in `optional_entities` but doesn't make them, so they read as unavailable, and it has no action: an automation that calls it fails as an unknown action. After upgrading again, the entities come back with the same entity IDs.
 
 From UNRELEASED (the backup restore signal):
 

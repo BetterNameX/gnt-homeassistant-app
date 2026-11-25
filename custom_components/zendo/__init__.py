@@ -68,6 +68,7 @@ from .managed_devices import (
     SERVICE_MANAGED_DEVICE_AUDIO_CONFIGURE_SCHEMA,
     SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE_SCHEMA,
     SERVICE_MANAGED_DEVICE_COMMAND_RESPONSE_SCHEMA,
+    SERVICE_MANAGED_DEVICE_LANGUAGE_REGION_CONFIGURE_SCHEMA,
     SERVICE_MANAGED_DEVICE_SCREEN_CONFIGURE_SCHEMA,
     SERVICE_MANAGED_DEVICE_SCREEN_WAKE_UP_SCHEMA,
     SERVICE_MANAGED_DEVICE_SCREENSAVER_CONFIGURE_SCHEMA,
@@ -82,6 +83,7 @@ from .managed_devices import (
     handle_managed_device_audio_configure,
     handle_managed_device_auto_brightness_configure,
     handle_managed_device_command_response,
+    handle_managed_device_language_region_configure,
     handle_managed_device_screen_configure,
     handle_managed_device_screen_wake_up,
     handle_managed_device_screensaver_configure,
@@ -152,6 +154,9 @@ SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE = (
 SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE = (
     "managed_device_wake_on_approach_configure"
 )
+SERVICE_MANAGED_DEVICE_LANGUAGE_REGION_CONFIGURE = (
+    "managed_device_language_region_configure"
+)
 SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE = "managed_device_admin_code_configure"
 
 STATIC_SERVICES = [
@@ -176,6 +181,7 @@ STATIC_SERVICES = [
     SERVICE_MANAGED_DEVICE_APP_UNLOCK,
     SERVICE_MANAGED_DEVICE_AUTO_BRIGHTNESS_CONFIGURE,
     SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE,
+    SERVICE_MANAGED_DEVICE_LANGUAGE_REGION_CONFIGURE,
     SERVICE_MANAGED_DEVICE_ADMIN_CODE_CONFIGURE,
 ]
 
@@ -790,6 +796,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE: (
             partial(handle_managed_device_wake_on_approach_configure, hass),
             SERVICE_MANAGED_DEVICE_WAKE_ON_APPROACH_CONFIGURE_SCHEMA,
+        ),
+        SERVICE_MANAGED_DEVICE_LANGUAGE_REGION_CONFIGURE: (
+            partial(handle_managed_device_language_region_configure, hass),
+            SERVICE_MANAGED_DEVICE_LANGUAGE_REGION_CONFIGURE_SCHEMA,
         ),
     }
 

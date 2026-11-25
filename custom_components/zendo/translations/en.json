@@ -45,6 +45,38 @@
           "medium": "Medium",
           "far": "Far"
         }
+      },
+      "language": {
+        "name": "Language"
+      },
+      "temperature_unit": {
+        "name": "Temperature unit",
+        "state": {
+          "celsius": "Celsius (°C)",
+          "fahrenheit": "Fahrenheit (°F)"
+        }
+      },
+      "measurement_system": {
+        "name": "Measurement system",
+        "state": {
+          "metric": "Metric",
+          "uk": "UK",
+          "us": "US"
+        }
+      },
+      "clock": {
+        "name": "Clock",
+        "state": {
+          "24_hour": "24-hour",
+          "12_hour": "12-hour (AM/PM)"
+        }
+      },
+      "first_weekday": {
+        "name": "First weekday",
+        "state": {
+          "monday": "Monday",
+          "sunday": "Sunday"
+        }
       }
     },
     "binary_sensor": {
@@ -359,6 +391,36 @@
         "sensitivity": {
           "name": "Sensitivity",
           "description": "Optional. How close someone has to come for the screen to wake. Only devices whose sensor tells distance have sensitivity levels. On the others it's left out, and the mode is still set."
+        }
+      }
+    },
+    "managed_device_language_region_configure": {
+      "name": "Configure language and region (Kiosk)",
+      "description": "Set the language and region Zendo uses on a device: the language it shows, and how it shows temperatures, distances, times and calendars. For example, set a guest's language when they check in at a hotel, or a relative's while they stay over, and set it back to Automatic when they leave. Automatic follows the device's own language and region: on a wall panel, the ones it was set up with. Provide at least one setting - only the values you provide will be changed, the rest remain unchanged. A value stays until it's changed again, here or in the device's Language & Region settings.",
+      "fields": {
+        "device": {
+          "name": "Device",
+          "description": "Required. One or more Zendo devices."
+        },
+        "language": {
+          "name": "Language",
+          "description": "Optional. The language Zendo shows, or Automatic to follow the device's own. In YAML or a template, give a language tag such as \"it-IT\" (case matters), or \"automatic\". A device that doesn't have the language changes nothing, and the action fails."
+        },
+        "temperature_unit": {
+          "name": "Temperature unit",
+          "description": "Optional. How Zendo shows temperatures, or Automatic to follow the device's own region."
+        },
+        "measurement_system": {
+          "name": "Measurement system",
+          "description": "Optional. How Zendo shows distances and volumes: Metric, UK (miles, with metric volumes) or US (miles and feet, with US volumes), or Automatic to follow the device's own region."
+        },
+        "clock": {
+          "name": "Clock",
+          "description": "Optional. Whether Zendo shows times in 24-hour or 12-hour (AM/PM) format, or Automatic to follow the device's own region."
+        },
+        "first_weekday": {
+          "name": "First weekday",
+          "description": "Optional. The day Zendo's calendars start the week on, or Automatic to follow the device's own region."
         }
       }
     },

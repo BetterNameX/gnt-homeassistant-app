@@ -17,7 +17,10 @@ Read these files for project details:
   the admin command `zendo/v2/get_managed_device_status_history`), the
   state the app reports, the `bngnt_managed_device_updated` / `_removed` / `_replaced`
   events, the automation services and their JSON-RPC commands and errors, wall panel
-  settings and presence (entities made only once a device reports them), the admin code
+  settings and presence (entities made only once a device reports them), language and
+  region (`managed_device_language_region_configure`, its `locale.set` with any language
+  tag and the other four settings checked, and five entities made only once a device
+  reports them, the language a plain sensor), the admin code
   (its private store, its `admin_code_status` in each list item, the WebSocket command
   devices report it with, the admin-only action that sets it, the `zendo/v2/` commands an
   admin views and changes it with, the view sealed to the key in the admin's token, the
@@ -55,5 +58,5 @@ Read these files for project details:
 
 ## Tests
 
-`python3 -m unittest discover -s tests -v`, from the repository root, with PyJWT and
-cryptography installed. See docs/managed-devices.md, "Tests".
+`python3 -m unittest discover -s tests -v`, from the repository root, with PyJWT,
+cryptography and voluptuous installed. See docs/managed-devices.md, "Tests".
